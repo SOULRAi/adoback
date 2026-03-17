@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Adoback — macOS 本地 Adobe 项目文件备份守护工具
-v0.4.0
+v0.5.0
 
 仅面向 macOS，中文优先 CLI。
 可通过 PyInstaller 打包为零依赖单文件二进制，任何 Mac 直接使用。
@@ -35,7 +35,7 @@ from pathlib import Path
 # 常量
 # ─────────────────────────────────────────────
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 APP_NAME = "adoback"
 SERVICE_LABEL = "com.local.adoback"
 GITHUB_REPO = "SOULRAi/adoback"
@@ -2078,6 +2078,443 @@ def cmd_uninstall(args, cfg):
 # update 自动更新
 # ─────────────────────────────────────────────
 
+def cmd_restore(args, cfg):
+    """交互式恢复备份文件。"""
+    dest = cfg.dest_root
+    layout = cfg.layout
+
+    printout("")
+    printbox("Adoback · 备份恢复")
+    printout("")
+
+    if not dest.is_dir():
+        printerr(f"备份目录不存在: {dest}")
+        sys.exit(EXIT_CONFIG)
+
+    # ── 收集所有备份文件 ──
+    # 结构: {rel_path: [(snapshot_name, full_path, size, mtime), ...]}
+    file_map: dict[str, list[tuple[str, Path, int, float]]] = {}
+
+    if layout == "snapshot":
+        snapshots = sorted(
+            [d for d in dest.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        if not snapshots:
+            printinfo("备份目录为空，没有可恢复的快照")
+            return
+
+        for snap in snapshots:
+            for fp in snap.rglob("*"):
+                if fp.is_file():
+                    rel = str(fp.relative_to(snap))
+                    try:
+                        st = fp.stat()
+                    except OSError:
+                        continue
+                    file_map.setdefault(rel, []).append(
+                        (snap.name, fp, st.st_size, st.st_mtime)
+                    )
+    else:
+        # mirror 模式：只有一份
+        for fp in dest.rglob("*"):
+            if fp.is_file():
+                rel = str(fp.relative_to(dest))
+                try:
+                    st = fp.stat()
+                except OSError:
+                    continue
+                file_map.setdefault(rel, []).append(
+                    ("mirror", fp, st.st_size, st.st_mtime)
+                )
+
+    if not file_map:
+        printinfo("备份目录为空，没有可恢复的文件")
+        return
+
+    # ── 搜索/筛选 ──
+    search = getattr(args, "search", None)
+    list_only = getattr(args, "list", False)
+
+    if search:
+        search_lower = search.lower()
+        matched = {k: v for k, v in file_map.items() if search_lower in k.lower()}
+        if not matched:
+            printerr(f"没有找到匹配 '{search}' 的备份文件")
+            printdim(f"    共 {len(file_map)} 个文件可搜索")
+            return
+        file_map = matched
+
+    # 按文件名排序
+    sorted_files = sorted(file_map.keys())
+
+    # ── 仅列表模式 ──
+    if list_only:
+        printinfo(f"备份文件列表 ({len(sorted_files)} 个)")
+        printbar("─")
+        for rel in sorted_files:
+            versions = file_map[rel]
+            size_mb = versions[0][2] / (1024 * 1024)
+            snap_count = len(versions)
+            snap_info = f"{snap_count} 个快照" if layout == "snapshot" else "mirror"
+            printout(f"  {_c(_CYAN, rel)}")
+            printdim(f"    {size_mb:.1f} MB · {snap_info}")
+        printout("")
+        return
+
+    # ── 交互式选择文件 ──
+    printinfo(f"找到 {len(sorted_files)} 个可恢复的文件")
+    printout("")
+
+    # 分页显示
+    page_size = 20
+    page = 0
+    total_pages = (len(sorted_files) + page_size - 1) // page_size
+
+    while True:
+        start = page * page_size
+        end = min(start + page_size, len(sorted_files))
+        page_files = sorted_files[start:end]
+
+        for i, rel in enumerate(page_files, start=start + 1):
+            versions = file_map[rel]
+            snap_count = len(versions)
+            tag = f"[{snap_count}个版本]" if layout == "snapshot" else ""
+            printout(f"  {_c(_BOLD, str(i)):>4s}  {rel}  {_c(_DIM, tag)}")
+
+        printout("")
+        if total_pages > 1:
+            printdim(f"    第 {page + 1}/{total_pages} 页")
+        printout(f"  {_c(_CYAN, '?')} 输入编号选择文件 (n=下一页, q=退出): ", )
+
+        try:
+            choice = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            printout("")
+            return
+
+        if choice == "q" or choice == "quit":
+            return
+        if choice == "n" and page + 1 < total_pages:
+            page += 1
+            continue
+        if choice == "p" and page > 0:
+            page -= 1
+            continue
+
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(sorted_files):
+                selected_rel = sorted_files[idx - 1]
+                break
+            printout(f"    {_c(_YELLOW, '编号超出范围，请重新输入')}")
+        except ValueError:
+            # 尝试作为搜索词
+            search_lower = choice.lower()
+            matched_idx = [i for i, f in enumerate(sorted_files) if search_lower in f.lower()]
+            if len(matched_idx) == 1:
+                selected_rel = sorted_files[matched_idx[0]]
+                break
+            elif len(matched_idx) > 1:
+                printout(f"    {_c(_YELLOW, f'匹配到 {len(matched_idx)} 个文件，请用编号精确选择')}")
+            else:
+                printout(f"    {_c(_YELLOW, '无效输入，请输入编号')}")
+
+    # ── 选择版本 ──
+    versions = file_map[selected_rel]
+    printout("")
+    printbar("─")
+    printout(f"  {_c(_BOLD, selected_rel)} 的备份版本:")
+    printbar("─")
+
+    for i, (snap_name, fp, size, mtime) in enumerate(versions, 1):
+        size_mb = size / (1024 * 1024)
+        t = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+        if layout == "snapshot":
+            printout(f"  {_c(_BOLD, str(i)):>4s}  {_c(_CYAN, snap_name)}  {size_mb:.1f} MB  {_c(_DIM, t)}")
+        else:
+            printout(f"  {_c(_BOLD, str(i)):>4s}  {size_mb:.1f} MB  {_c(_DIM, t)}")
+
+    if len(versions) == 1:
+        version_idx = 0
+    else:
+        printout("")
+        printout(f"  {_c(_CYAN, '?')} 选择版本编号 (默认 1 = 最新): ", )
+        try:
+            v_choice = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            printout("")
+            return
+        version_idx = 0
+        if v_choice:
+            try:
+                vi = int(v_choice)
+                if 1 <= vi <= len(versions):
+                    version_idx = vi - 1
+            except ValueError:
+                pass
+
+    snap_name, src_fp, size, mtime = versions[version_idx]
+
+    # ── 确定恢复目标路径 ──
+    # 尝试还原到原始源目录
+    roots = cfg.source_roots
+    restore_target = None
+
+    # 如果 rel_path 格式是 "rootname/subpath"，尝试匹配源目录
+    parts = selected_rel.split("/", 1)
+    if len(parts) > 1 and roots:
+        for r in roots:
+            if r.name == parts[0]:
+                restore_target = r / parts[1]
+                break
+    if not restore_target and roots:
+        restore_target = roots[0] / selected_rel
+
+    printout("")
+    printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 恢复到: {_c(_BOLD, str(restore_target))}")
+    size_mb = size / (1024 * 1024)
+    printdim(f"    大小: {size_mb:.1f} MB  来自: {snap_name}")
+
+    # 如果目标文件已存在，先备份
+    if restore_target and restore_target.exists():
+        printout(f"  {_c(_YELLOW, _ICON_WARN)} 目标文件已存在，将先备份当前版本")
+
+    printout("")
+    printout(f"  {_c(_CYAN, '?')} 确认恢复? (y/N): ", )
+    try:
+        confirm = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        printout("")
+        return
+
+    if confirm not in ("y", "yes"):
+        printinfo("已取消恢复")
+        return
+
+    # ── 执行恢复 ──
+    try:
+        # 如果目标已存在，备份到 .bak
+        if restore_target.exists():
+            bak_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            bak_path = restore_target.with_suffix(restore_target.suffix + f".bak.{bak_ts}")
+            shutil.copy2(str(restore_target), str(bak_path))
+            printinfo(f"当前版本已备份到: {bak_path.name}")
+
+        # 确保目标目录存在
+        restore_target.parent.mkdir(parents=True, exist_ok=True)
+
+        # 复制恢复
+        shutil.copy2(str(src_fp), str(restore_target))
+
+        printout("")
+        printbar("═")
+        printout(f"  {_c(_GREEN, _ICON_SPARK)} {_c(_BOLD, _c(_GREEN, '恢复成功!'))}")
+        printbar("═")
+        printout(f"    {_c(_DIM, str(restore_target))}")
+        printout("")
+
+    except Exception as e:
+        printerr(f"恢复失败: {e}")
+        sys.exit(EXIT_RUNTIME)
+
+
+def cmd_clean(args, cfg):
+    """备份空间清理管理。"""
+    dest = cfg.dest_root
+    layout = cfg.layout
+    dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
+
+    # 清理策略参数（命令行覆盖配置文件）
+    keep_last = getattr(args, "keep_last", None)
+    if keep_last is None:
+        keep_last = cfg.keep_last
+    keep_days = getattr(args, "keep_days", None)
+    if keep_days is None:
+        keep_days = cfg.keep_days
+    max_size_gb = getattr(args, "max_size", None)
+
+    printout("")
+    printbox("Adoback · 备份清理")
+    printout("")
+
+    if not dest.is_dir():
+        printerr(f"备份目录不存在: {dest}")
+        sys.exit(EXIT_CONFIG)
+
+    # ── 统计当前空间占用 ──
+    printstep(1, "扫描备份目录")
+    total_size = 0
+    total_files = 0
+
+    if layout == "snapshot":
+        snapshots = sorted(
+            [d for d in dest.iterdir() if d.is_dir()],
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        for snap in snapshots:
+            for fp in snap.rglob("*"):
+                if fp.is_file():
+                    try:
+                        total_size += fp.stat().st_size
+                        total_files += 1
+                    except OSError:
+                        pass
+
+        total_mb = total_size / (1024 * 1024)
+        total_gb = total_size / (1024 * 1024 * 1024)
+        printinfo(f"备份目录: {dest}")
+        printinfo(f"快照数量: {len(snapshots)}")
+        printinfo(f"文件总数: {total_files}")
+        printinfo(f"占用空间: {total_gb:.2f} GB ({total_mb:.0f} MB)")
+        printout("")
+
+        if not snapshots:
+            printinfo("没有快照需要清理")
+            return
+
+        # ── 确定要清理的快照 ──
+        printstep(2, "分析清理策略")
+        printdim(f"    保留最新 {keep_last} 个快照")
+        printdim(f"    清理 {keep_days} 天前的快照")
+        if max_size_gb is not None:
+            printdim(f"    总容量上限 {max_size_gb} GB")
+
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=keep_days)
+        to_remove = []
+        remove_size = 0
+
+        for i, snap in enumerate(snapshots):
+            if i < keep_last:
+                continue
+            # 尝试从目录名解析时间
+            try:
+                snap_time = datetime.datetime.strptime(snap.name, "%Y%m%d_%H%M%S")
+            except ValueError:
+                continue
+            if snap_time < cutoff:
+                snap_size = sum(
+                    f.stat().st_size for f in snap.rglob("*")
+                    if f.is_file()
+                )
+                to_remove.append((snap, snap_size, snap_time))
+                remove_size += snap_size
+
+        # 容量上限策略：如果设置了 max_size_gb，从最旧的开始删
+        if max_size_gb is not None:
+            max_bytes = max_size_gb * 1024 * 1024 * 1024
+            if total_size > max_bytes:
+                # 从最旧的（列表末尾）开始标记
+                already_removing = {s[0].name for s in to_remove}
+                remaining_size = total_size - remove_size
+                for snap in reversed(snapshots):
+                    if remaining_size <= max_bytes:
+                        break
+                    if snap.name in already_removing:
+                        continue
+                    # 不删最新的 keep_last 个
+                    snap_idx = snapshots.index(snap)
+                    if snap_idx < keep_last:
+                        continue
+                    snap_size = sum(
+                        f.stat().st_size for f in snap.rglob("*")
+                        if f.is_file()
+                    )
+                    try:
+                        snap_time = datetime.datetime.strptime(snap.name, "%Y%m%d_%H%M%S")
+                    except ValueError:
+                        snap_time = datetime.datetime.now()
+                    to_remove.append((snap, snap_size, snap_time))
+                    remove_size += snap_size
+                    remaining_size -= snap_size
+
+        if not to_remove:
+            printout("")
+            printout(f"  {_c(_GREEN, _ICON_OK)} 没有需要清理的快照")
+            printdim(f"    所有快照都在保留策略范围内")
+            printout("")
+            return
+
+        # ── 预览 ──
+        printstep(3, "清理预览" if dry_run else "执行清理")
+        remove_mb = remove_size / (1024 * 1024)
+        remove_gb = remove_size / (1024 * 1024 * 1024)
+        printout("")
+        printout(f"  {_c(_YELLOW, _ICON_WARN)} 将清理 {_c(_BOLD, str(len(to_remove)))} 个快照，释放 {_c(_BOLD, f'{remove_gb:.2f} GB')} 空间")
+        printout("")
+
+        for snap, snap_size, snap_time in sorted(to_remove, key=lambda x: x[2]):
+            snap_mb = snap_size / (1024 * 1024)
+            t = snap_time.strftime("%Y-%m-%d %H:%M")
+            printout(f"    {_c(_RED, '✗')} {snap.name}  {_c(_DIM, f'{snap_mb:.1f} MB')}  {_c(_DIM, t)}")
+
+        # ── dry-run 到此为止 ──
+        if dry_run:
+            printout("")
+            printout(f"  {_c(_DIM, '[预演模式] 以上文件不会被删除')}")
+            printout(f"  去掉 --dry-run 执行实际清理")
+            printout("")
+            return
+
+        # ── 确认 ──
+        if not force:
+            printout("")
+            printout(f"  {_c(_CYAN, '?')} 确认清理? 删除后不可恢复 (y/N): ", )
+            try:
+                confirm = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                printout("")
+                return
+            if confirm not in ("y", "yes"):
+                printinfo("已取消清理")
+                return
+
+        # ── 执行删除 ──
+        cleaned = 0
+        cleaned_size = 0
+        for snap, snap_size, _ in to_remove:
+            try:
+                shutil.rmtree(snap)
+                cleaned += 1
+                cleaned_size += snap_size
+                printinfo(f"已删除: {snap.name}")
+            except Exception as e:
+                printwarn(f"删除失败: {snap.name} - {e}")
+
+        cleaned_gb = cleaned_size / (1024 * 1024 * 1024)
+        remaining_gb = (total_size - cleaned_size) / (1024 * 1024 * 1024)
+
+        printout("")
+        printbar("═")
+        printout(f"  {_c(_GREEN, _ICON_SPARK)} {_c(_BOLD, _c(_GREEN, '清理完成!'))}")
+        printbar("═")
+        printout(f"    删除快照   {cleaned} 个")
+        printout(f"    释放空间   {cleaned_gb:.2f} GB")
+        printout(f"    剩余占用   {remaining_gb:.2f} GB")
+        printout("")
+
+    else:
+        # mirror 模式：没有快照概念，直接统计
+        for fp in dest.rglob("*"):
+            if fp.is_file():
+                try:
+                    total_size += fp.stat().st_size
+                    total_files += 1
+                except OSError:
+                    pass
+        total_gb = total_size / (1024 * 1024 * 1024)
+        printinfo(f"备份目录 (mirror 模式): {dest}")
+        printinfo(f"文件总数: {total_files}")
+        printinfo(f"占用空间: {total_gb:.2f} GB")
+        printout("")
+        printdim("    mirror 模式下每个文件只保留一份，无需按快照清理")
+        printdim("    如需释放空间，请手动删除不需要的备份文件")
+        printout("")
+
+
 def cmd_update(args, cfg):
     """检查并自动更新到最新版本。"""
     check_only = getattr(args, "check", False)
@@ -2458,9 +2895,10 @@ def build_parser() -> argparse.ArgumentParser:
               {prog} setup                一键初始化 (首次使用)
               {prog} backup               增量备份
               {prog} backup --full        全量备份
+              {prog} restore              恢复备份文件
+              {prog} clean --dry-run      预览可清理空间
               {prog} service on           安装并启动开机自启
               {prog} doctor               自检
-              {prog} config show          查看配置
 
             运行 '{prog} guide' 查看完整新手引导
         """),
@@ -2524,6 +2962,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("update", help="检查并更新到最新版本")
     p.add_argument("--check", action="store_true", help="仅检查是否有新版本，不更新")
+
+    # restore — 恢复备份文件
+    p = sub.add_parser("restore", help="从备份中恢复文件")
+    p.add_argument("--search", "-s", help="搜索文件名关键词")
+    p.add_argument("--list", "-l", dest="list", action="store_true", help="仅列出备份文件，不恢复")
+
+    # clean — 备份空间清理
+    p = sub.add_parser("clean", help="清理过期备份，释放磁盘空间")
+    p.add_argument("--dry-run", action="store_true", help="预览将清理的文件，不实际删除")
+    p.add_argument("--force", "-f", action="store_true", help="跳过确认直接清理")
+    p.add_argument("--keep-last", type=int, help="保留最新 N 个快照 (覆盖配置)")
+    p.add_argument("--keep-days", type=int, help="保留最近 N 天的快照 (覆盖配置)")
+    p.add_argument("--max-size", type=float, help="备份总容量上限 (GB)")
 
     # ── 向后兼容隐藏别名 ──
     # 旧命令仍可用，但不在 help 中显示
@@ -2609,7 +3060,7 @@ def main():
             args.json_report = getattr(args, "json_report", False)
 
     # ── 不需要配置文件的命令 ──
-    no_config_commands = {"setup", "config", "guide", "install", "update"}
+    no_config_commands = {"setup", "config", "guide", "install", "update", "uninstall"}
     needs_config = cmd not in no_config_commands
 
     cfg = None
@@ -2740,6 +3191,14 @@ def main():
 
         elif cmd == "uninstall":
             cmd_uninstall(args, cfg)
+
+        # ── restore ──
+        elif cmd == "restore":
+            cmd_restore(args, cfg)
+
+        # ── clean ──
+        elif cmd == "clean":
+            cmd_clean(args, cfg)
 
         # ── update ──
         elif cmd == "update":

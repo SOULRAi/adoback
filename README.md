@@ -159,6 +159,17 @@ adoback service status       # 查看服务状态
 adoback service restart      # 重启服务
 ```
 
+### 恢复与清理
+
+```bash
+adoback restore              # 交互式选择文件恢复
+adoback restore -s "logo"    # 搜索包含 logo 的备份文件
+adoback restore --list       # 列出所有备份文件
+adoback clean --dry-run      # 预览可清理空间
+adoback clean                # 按策略清理过期快照
+adoback clean --max-size 10  # 备份总容量上限 10GB
+```
+
 ### 查看与报告
 
 ```bash
@@ -228,7 +239,7 @@ adoback uninstall            # 卸载
 
 ## 项目状态
 
-当前版本 **v0.4.0**，处于**可用原型**阶段。核心备份、守护、服务化功能已验证可用。
+当前版本 **v0.5.0**，处于**可用原型**阶段。核心备份、恢复、清理、守护、服务化功能已验证可用。
 
 ### 已实现
 
@@ -255,13 +266,17 @@ adoback uninstall            # 卸载
 - [x] npm 包分发
 - [x] 多源目录支持
 - [x] 美化 CLI 界面（Unicode 边框对齐、彩色图标）
+- [x] 备份恢复 (restore)
+- [x] 备份空间清理 (clean)
+- [x] 一键更新 (update)
 
 ### 计划中
 
-- [ ] FSEvents 实时文件监听（替代轮询）
-- [ ] 指数退避重试策略
-- [ ] Homebrew Formula
 - [ ] macOS 桌面通知
+- [ ] 忽略规则 (backup.ignore)
+- [ ] TUI 实时仪表盘 (status)
+- [ ] FSEvents 实时文件监听（替代轮询）
+- [ ] Homebrew Formula
 - [ ] APFS clone 优化
 
 ## License
