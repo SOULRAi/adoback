@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Adoback — macOS 本地 Adobe 项目文件备份守护工具
-v0.3.0
+v0.4.0
 
 仅面向 macOS，中文优先 CLI。
 可通过 PyInstaller 打包为零依赖单文件二进制，任何 Mac 直接使用。
@@ -26,6 +26,8 @@ import tempfile
 import textwrap
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -33,9 +35,12 @@ from pathlib import Path
 # 常量
 # ─────────────────────────────────────────────
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 APP_NAME = "adoback"
 SERVICE_LABEL = "com.local.adoback"
+GITHUB_REPO = "SOULRAi/adoback"
+GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RAW_SOURCE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/adoback.py"
 
 HOME = Path.home()
 DEFAULT_INSTALL_DIR = HOME / ".local" / "adoback"
@@ -221,7 +226,8 @@ DEFAULT_CONFIG = {
         "language": "zh",
     },
     "source": {
-        "root": "",
+        "root": "",     # 向后兼容: 单目录
+        "roots": [],    # 新版: 多目录列表
     },
     "destination": {
         "root": "",
@@ -316,9 +322,24 @@ class Config:
         return d
 
     @property
+    def source_roots(self) -> list[Path]:
+        """获取所有源目录（兼容旧版 root 和新版 roots）。"""
+        roots_raw = self.get("source", "roots", default=[])
+        root_raw = self.get("source", "root", default="")
+        paths = []
+        if roots_raw:
+            for r in roots_raw:
+                if r:
+                    paths.append(Path(r).expanduser().resolve())
+        if root_raw and not paths:
+            paths.append(Path(root_raw).expanduser().resolve())
+        return paths
+
+    @property
     def source_root(self) -> Path:
-        r = self.get("source", "root", default="")
-        return Path(r).expanduser().resolve() if r else Path()
+        """向后兼容: 返回第一个源目录。"""
+        roots = self.source_roots
+        return roots[0] if roots else Path()
 
     @property
     def dest_root(self) -> Path:
@@ -413,21 +434,23 @@ class Config:
     def validate(self) -> list[str]:
         """验证配置，返回问题列表。"""
         issues = []
-        src = self.get("source", "root", default="")
+        roots = self.source_roots
         dst = self.get("destination", "root", default="")
-        if not src:
-            issues.append("source.root 未设置")
-        elif not Path(src).expanduser().exists():
-            issues.append(f"source.root 目录不存在: {src}")
+        if not roots:
+            issues.append("source.roots 未设置 (至少需要一个源目录)")
+        else:
+            for r in roots:
+                if not r.exists():
+                    issues.append(f"源目录不存在: {r}")
         if not dst:
             issues.append("destination.root 未设置")
         else:
             dp = Path(dst).expanduser().resolve()
-            sp = Path(src).expanduser().resolve() if src else Path()
-            if src and dp == sp:
-                issues.append("destination.root 不能与 source.root 相同")
-            if src and str(dp).startswith(str(sp) + "/"):
-                issues.append("destination.root 不能位于 source.root 内部")
+            for r in roots:
+                if dp == r:
+                    issues.append(f"destination.root 不能与源目录相同: {r}")
+                if str(dp).startswith(str(r) + "/"):
+                    issues.append(f"destination.root 不能位于源目录内部: {r}")
         layout = self.layout
         if layout not in ("snapshot", "mirror"):
             issues.append(f"destination.layout 无效: {layout} (应为 snapshot 或 mirror)")
@@ -470,6 +493,39 @@ def _get_bin_path() -> str:
     return str(Path(__file__).resolve())
 
 
+def _parse_version(v: str) -> tuple:
+    """将版本字符串转为可比较的元组，如 'v0.4.0' → (0, 4, 0)"""
+    return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+
+
+def _detect_asset_name() -> str:
+    """根据当前架构返回 GitHub Release 资源名。"""
+    machine = platform.machine().lower()
+    if machine == "arm64":
+        return "adoback-macos-arm64"
+    elif machine == "x86_64":
+        return "adoback-macos-x86_64"
+    return "adoback-macos-universal"
+
+
+def _github_get_json(url: str) -> dict:
+    """从 GitHub API 获取 JSON 数据。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "adoback-updater"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _github_download(url: str, dest_path: Path):
+    """下载文件到指定路径。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "adoback-updater",
+        "Accept": "application/octet-stream",
+    })
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        with open(dest_path, "wb") as f:
+            shutil.copyfileobj(resp, f)
+
+
 # ─────────────────────────────────────────────
 # 输出工具（带终端颜色）
 # ─────────────────────────────────────────────
@@ -479,8 +535,18 @@ _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
 _RED = "\033[31m"
 _CYAN = "\033[36m"
+_MAGENTA = "\033[35m"
+_BLUE = "\033[34m"
 _DIM = "\033[2m"
 _RESET = "\033[0m"
+
+# 图标
+_ICON_OK = "✔"
+_ICON_ERR = "✘"
+_ICON_WARN = "⚠"
+_ICON_ARROW = "›"
+_ICON_DOT = "·"
+_ICON_SPARK = "✦"
 
 
 def _use_color() -> bool:
@@ -491,32 +557,71 @@ def _c(code: str, text: str) -> str:
     return f"{code}{text}{_RESET}" if _use_color() else text
 
 
+def _visible_len(s: str) -> int:
+    """计算字符串可见宽度（去掉 ANSI 转义、中文算 2 宽度）。"""
+    import re
+    clean = re.sub(r'\033\[[0-9;]*m', '', s)
+    w = 0
+    for ch in clean:
+        if '\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f' or '\uff00' <= ch <= '\uffef':
+            w += 2
+        else:
+            w += 1
+    return w
+
+
 def printout(msg: str = ""):
     print(msg)
 
 
 def printerr(msg: str):
-    print(f"  {_c(_RED, '✗')} {msg}", file=sys.stderr)
+    print(f"  {_c(_RED, _ICON_ERR)} {msg}", file=sys.stderr)
 
 
 def printwarn(msg: str):
-    print(f"  {_c(_YELLOW, '⚠')} {msg}", file=sys.stderr)
+    print(f"  {_c(_YELLOW, _ICON_WARN)} {msg}", file=sys.stderr)
 
 
 def printinfo(msg: str):
-    print(f"  {_c(_GREEN, '✓')} {msg}")
+    print(f"  {_c(_GREEN, _ICON_OK)} {msg}")
 
 
 def printdim(msg: str):
     print(f"  {_c(_DIM, msg)}")
 
 
-def printstep(step: int, msg: str):
-    print(f"\n  {_c(_CYAN, f'[{step}]')} {_c(_BOLD, msg)}")
+def printstep(step: int | str, msg: str):
+    label = f"[{step}]" if isinstance(step, int) else step
+    print(f"\n  {_c(_CYAN, label)} {_c(_BOLD, msg)}")
 
 
 def printtitle(msg: str):
     print(f"\n{_c(_BOLD, msg)}")
+
+
+def printbox(title: str, width: int = 48, style: str = "double"):
+    """打印对齐的 Unicode 边框标题。"""
+    if style == "double":
+        tl, tr, bl, br, h, v = "╔", "╗", "╚", "╝", "═", "║"
+    else:
+        tl, tr, bl, br, h, v = "┌", "┐", "└", "┘", "─", "│"
+    inner = width - 2
+    top = f"  {_c(_CYAN, tl + h * inner + tr)}"
+    # 居中标题
+    t = f" {_ICON_SPARK} {title} {_ICON_SPARK} " if _use_color() else f"  {title}  "
+    vis = _visible_len(t)
+    pad_total = inner - vis
+    pad_l = pad_total // 2
+    pad_r = pad_total - pad_l
+    mid = f"  {_c(_CYAN, v)}{' ' * pad_l}{_c(_BOLD, t)}{' ' * pad_r}{_c(_CYAN, v)}"
+    bot = f"  {_c(_CYAN, bl + h * inner + br)}"
+    printout(top)
+    printout(mid)
+    printout(bot)
+
+
+def printbar(char: str = "─", width: int = 44):
+    printout(f"  {_c(_DIM, char * width)}")
 
 
 # ─────────────────────────────────────────────
@@ -761,10 +866,10 @@ def _match_glob(name: str, pattern: str) -> bool:
 
 
 def scan_files(cfg: Config) -> list[FileItem]:
-    """扫描源目录，返回候选文件列表。"""
-    root = cfg.source_root
-    if not root.is_dir():
-        printerr(f"源目录不存在: {root}")
+    """扫描所有源目录，返回候选文件列表。"""
+    roots = cfg.source_roots
+    if not roots:
+        printerr("未配置源目录")
         return []
 
     include = cfg.include_exts
@@ -772,32 +877,31 @@ def scan_files(cfg: Config) -> list[FileItem]:
     exclude_dirs = cfg.exclude_dirs
     items = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        # 剪枝排除目录
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in exclude_dirs and not d.startswith(".")
-            or d in (".git",)  # .git 已在 exclude_dirs 默认值中
-        ]
-        # 重新过滤：只排除 exclude_dirs 中的
-        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+    for root in roots:
+        if not root.is_dir():
+            printerr(f"源目录不存在，已跳过: {root}")
+            continue
 
-        for fname in filenames:
-            # 检查扩展名
-            _, ext = os.path.splitext(fname)
-            if ext.lower() not in include:
-                continue
-            # 检查排除模式
-            if any(_match_glob(fname, pat) for pat in exclude):
-                continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
 
-            full = Path(dirpath) / fname
-            try:
-                st = full.stat()
-            except (OSError, PermissionError):
-                continue
-            rel = str(full.relative_to(root))
-            items.append(FileItem(full, rel, st.st_size, st.st_mtime_ns))
+            for fname in filenames:
+                _, ext = os.path.splitext(fname)
+                if ext.lower() not in include:
+                    continue
+                if any(_match_glob(fname, pat) for pat in exclude):
+                    continue
+
+                full = Path(dirpath) / fname
+                try:
+                    st = full.stat()
+                except (OSError, PermissionError):
+                    continue
+                # 多根目录时用 "根目录名/相对路径" 作为 rel
+                rel = str(full.relative_to(root))
+                if len(roots) > 1:
+                    rel = f"{root.name}/{rel}"
+                items.append(FileItem(full, rel, st.st_size, st.st_mtime_ns))
 
     return items
 
@@ -1066,33 +1170,44 @@ def print_summary(result: BackupResult):
     mb = result.bytes_copied / (1024 * 1024)
     throughput = mb / dur if dur > 0 else 0
 
-    printtitle("运行摘要")
+    printout("")
+    printbar("─")
     status_str = _status_zh(result.status)
     if result.status == "success":
+        icon = _c(_GREEN, _ICON_OK)
         status_str = _c(_GREEN, status_str)
     elif result.status == "partial":
+        icon = _c(_YELLOW, _ICON_WARN)
         status_str = _c(_YELLOW, status_str)
     elif result.status == "failed":
+        icon = _c(_RED, _ICON_ERR)
         status_str = _c(_RED, status_str)
-
-    printout(f"  状态:     {status_str}")
-    printout(f"  总文件:   {result.total}")
-    printout(f"  已复制:   {_c(_GREEN, str(result.copied))}")
-    printout(f"  已跳过:   {result.skipped}")
-    if result.failed > 0:
-        printout(f"  失败:     {_c(_RED, str(result.failed))}")
     else:
-        printout(f"  失败:     0")
-    printout(f"  数据量:   {mb:.1f} MB")
-    printout(f"  耗时:     {dur:.1f} 秒")
+        icon = _c(_DIM, _ICON_DOT)
+
+    printout(f"  {icon} {_c(_BOLD, '运行摘要')}  {status_str}")
+    printbar("─")
+    printout("")
+    printout(f"    总文件   {_c(_BOLD, str(result.total)):>8s}")
+    printout(f"    已复制   {_c(_GREEN, str(result.copied)):>8s}")
+    printout(f"    已跳过   {_c(_DIM, str(result.skipped)):>8s}")
+    if result.failed > 0:
+        printout(f"    失败     {_c(_RED, str(result.failed)):>8s}")
+    else:
+        printout(f"    失败     {_c(_DIM, '0'):>8s}")
+    printout(f"    数据量   {mb:>7.1f} MB")
+    printout(f"    耗时     {dur:>7.1f} 秒")
     if dur > 0:
-        printout(f"  吞吐:     {throughput:.1f} MB/s")
+        printout(f"    吞吐     {throughput:>7.1f} MB/s")
+    printout("")
 
     if result.failures:
-        printout("")
-        printtitle("失败文件")
+        printbar("─")
+        printout(f"  {_c(_RED, _ICON_ERR)} {_c(_BOLD, '失败文件')}")
+        printbar("─")
         for rel, err in result.failures:
             printerr(f"{rel}: {err}")
+        printout("")
 
 
 def _status_zh(status: str) -> str:
@@ -1330,18 +1445,19 @@ def run_daemon(cfg: Config):
 
 def run_doctor(cfg: Config):
     """自检：检查系统环境和配置。"""
-    printtitle("Adoback 自检")
+    printout("")
+    printbox("Adoback 自检")
     ok = True
 
     # 1. 系统
-    printtitle("[系统环境]")
-    printout(f"  macOS:    {platform.mac_ver()[0] or '未知'}")
+    printstep("◆", "系统环境")
+    printout(f"    macOS:    {platform.mac_ver()[0] or '未知'}")
     if _is_frozen():
-        printout(f"  运行模式: 独立二进制")
+        printout(f"    运行模式: 独立二进制")
     else:
-        printout(f"  Python:   {platform.python_version()}")
-    printout(f"  用户:     {os.environ.get('USER', '未知')}")
-    printout(f"  版本:     {VERSION}")
+        printout(f"    Python:   {platform.python_version()}")
+    printout(f"    用户:     {os.environ.get('USER', '未知')}")
+    printout(f"    版本:     {VERSION}")
 
     if platform.system() != "Darwin":
         printwarn("当前系统非 macOS，部分功能可能不可用")
@@ -1350,7 +1466,7 @@ def run_doctor(cfg: Config):
         printinfo("macOS 环境正常")
 
     # 2. 配置
-    printtitle("[配置检查]")
+    printstep("◆", "配置检查")
     config_path = getattr(cfg, '_config_path', None)
     if config_path:
         printinfo(f"配置文件: {config_path}")
@@ -1365,27 +1481,27 @@ def run_doctor(cfg: Config):
         printinfo("配置验证通过")
 
     # 3. 源目录
-    printtitle("[路径检查]")
-    src = cfg.source_root
-    if src and src != Path():
-        if src.is_dir():
-            printinfo(f"源目录可访问: {src}")
-            if os.access(src, os.R_OK):
-                printinfo("源目录可读")
-                # 扫描文件数
-                items = scan_files(cfg)
-                if items:
-                    total_size = sum(i.size for i in items)
-                    total_mb = total_size / (1024 * 1024)
-                    printinfo(f"发现 {len(items)} 个候选文件 ({total_mb:.1f} MB)")
-                else:
-                    printwarn("未发现符合条件的文件")
+    printstep("◆", "路径检查")
+    roots = cfg.source_roots
+    if roots:
+        for src in roots:
+            if src.is_dir():
+                printinfo(f"源目录可访问: {src}")
+                if not os.access(src, os.R_OK):
+                    printerr(f"源目录不可读: {src}")
+                    ok = False
             else:
-                printerr("源目录不可读")
+                printerr(f"源目录不存在: {src}")
                 ok = False
-        else:
-            printerr(f"源目录不存在: {src}")
-            ok = False
+        # 扫描文件数
+        if any(r.is_dir() for r in roots):
+            items = scan_files(cfg)
+            if items:
+                total_size = sum(i.size for i in items)
+                total_mb = total_size / (1024 * 1024)
+                printinfo(f"发现 {len(items)} 个候选文件 ({total_mb:.1f} MB)")
+            else:
+                printwarn("未发现符合条件的文件")
 
     dst = cfg.dest_root
     if dst and dst != Path():
@@ -1400,7 +1516,7 @@ def run_doctor(cfg: Config):
             printwarn(f"目标目录不存在 (将自动创建): {dst}")
 
     # 4. 状态目录
-    printtitle("[运行状态]")
+    printstep("◆", "运行状态")
     state = cfg.state_dir
     if state.is_dir():
         printinfo(f"状态目录: {state}")
@@ -1430,7 +1546,7 @@ def run_doctor(cfg: Config):
         printinfo("无锁冲突")
 
     # 6. 服务
-    printtitle("[服务状态]")
+    printstep("◆", "服务状态")
     plist = _get_plist_path(cfg)
     if plist.exists():
         printinfo(f"服务已安装: {plist}")
@@ -1439,10 +1555,11 @@ def run_doctor(cfg: Config):
 
     # 结论
     printout("")
+    printbar()
     if ok:
-        printinfo(_c(_GREEN, "自检通过 — 可以开始使用"))
+        printout(f"  {_c(_GREEN, _ICON_SPARK + ' 自检通过 — 一切就绪，可以开始使用了！')}")
     else:
-        printerr("自检发现问题，请根据上方提示修复")
+        printout(f"  {_c(_RED, _ICON_ERR + ' 自检发现问题，请根据上方提示修复')}")
 
     return ok
 
@@ -1453,15 +1570,21 @@ def run_doctor(cfg: Config):
 
 CONFIG_TEMPLATE = """\
 # Adoback 配置文件
-# 文档: https://github.com/user/adoback
+# 文档: https://github.com/SOULRAi/adoback
 
 [general]
 language = "zh"
 
 [source]
-# 必填: 你的 Adobe 项目文件目录
-# 示例: root = "/Users/你的用户名/Documents/Adobe"
-root = ""
+# 必填: 你的 Adobe 项目文件目录 (支持多个)
+# 每行一个目录，Adoback 会扫描所有目录中的 Adobe 文件
+# 示例:
+#   roots = [
+#       "/Users/你的用户名/Documents/Photoshop",
+#       "/Users/你的用户名/Documents/Premiere",
+#       "/Users/你的用户名/Documents/AfterEffects"
+#   ]
+roots = []
 
 [destination]
 # 必填: 备份输出目录 (不能与源目录相同)
@@ -1581,10 +1704,25 @@ def cmd_config_validate(args, cfg):
 
 def cmd_config_paths(args, cfg):
     """显示所有关键路径及其状态。"""
-    printtitle("关键路径")
-    paths = [
-        ("配置文件", Path(args.config) if args.config else getattr(cfg, '_config_path', DEFAULT_CONFIG_PATH)),
-        ("源目录", cfg.source_root),
+    printout("")
+    printbox("关键路径", style="single")
+    printout("")
+
+    config_p = Path(args.config) if args.config else getattr(cfg, '_config_path', DEFAULT_CONFIG_PATH)
+    exists_mark = _c(_GREEN, _ICON_OK) if config_p.exists() else _c(_DIM, _ICON_ERR)
+    printout(f"  {exists_mark} {'配置文件':10s}  {config_p}")
+
+    # 多源目录
+    roots = cfg.source_roots
+    if roots:
+        for i, r in enumerate(roots):
+            label = "源目录" if i == 0 else ""
+            exists_mark = _c(_GREEN, _ICON_OK) if r.exists() else _c(_DIM, _ICON_ERR)
+            printout(f"  {exists_mark} {label:10s}  {r}")
+    else:
+        printout(f"  {_c(_DIM, _ICON_ERR)} {'源目录':10s}  (未设置)")
+
+    other_paths = [
         ("目标目录", cfg.dest_root),
         ("状态目录", cfg.state_dir),
         ("日志目录", cfg.log_dir),
@@ -1594,10 +1732,11 @@ def cmd_config_paths(args, cfg):
         ("JSONL日志", cfg.log_path),
         ("服务plist", _get_plist_path(cfg)),
     ]
-    for name, p in paths:
+    for name, p in other_paths:
         p = Path(p)
-        exists_mark = _c(_GREEN, "✓") if p.exists() else _c(_DIM, "✗")
+        exists_mark = _c(_GREEN, _ICON_OK) if p.exists() else _c(_DIM, _ICON_ERR)
         printout(f"  {exists_mark} {name:10s}  {p}")
+    printout("")
 
 
 # ─────────────────────────────────────────────
@@ -1605,56 +1744,66 @@ def cmd_config_paths(args, cfg):
 # ─────────────────────────────────────────────
 
 GUIDE_TEXT = """\
-╔════════════════════════════════════════════╗
-║    Adoback 新手引导             ║
-╚════════════════════════════════════════════╝
 
-Adoback 是一个 macOS 本地备份守护工具，
-为你的 Adobe 项目文件提供独立于 Adobe 自身的备份保护。
+  ✦ Adoback 新手引导 ✦
 
-支持的文件类型:
-  PSD, PSB, AI, INDD, IDML, PRPROJ, AEP, XD, PDF 等
+  嘿！欢迎使用 Adoback 👋
 
-━━━ 快速开始 ━━━
+  简单来说，这个工具帮你自动备份 Mac 上的 Adobe 项目文件。
+  不管是 PS 闪退、PR 崩溃、还是不小心覆盖了文件——
+  有了 Adoback，你总能找回之前的版本。
 
-  首次使用，一条命令搞定:
+  它能备份这些文件:
+    Photoshop (.psd .psb)    Illustrator (.ai)
+    Premiere (.prproj)       After Effects (.aep)
+    InDesign (.indd .idml)   XD (.xd)    PDF (.pdf)
+
+  ─────────────────────────────────────────
+
+  🚀 第一次用？一条命令搞定:
+
     {prog} setup
 
-  也可以手动逐步来:
+  它会引导你设置好所有东西，包括:
+  告诉它你的 Adobe 文件放在哪、备份存到哪。
+  你可以添加多个目录，比如 PS 的一个、PR 的一个。
 
-  1. 生成配置:    {prog} config init
-  2. 编辑配置:    nano ~/.local/adoback/config.toml
-  3. 自检:        {prog} doctor
-  4. 试运行:      {prog} backup --dry-run
-  5. 全量备份:    {prog} backup --full
-  6. 开机自启:    {prog} service on
+  ─────────────────────────────────────────
 
-━━━ 常用命令 ━━━
+  📋 也可以手动来，一步一步:
 
-  backup              增量备份 (默认)
-  backup --full       全量备份
-  backup --dry-run    预演模式
-  daemon              守护模式 (前台运行)
-  last-run            查看最近运行
-  report              查看报告
-  doctor              系统自检
+    1. 生成配置文件     {prog} config init
+    2. 编辑配置         nano ~/.local/adoback/config.toml
+    3. 跑一下自检       {prog} doctor
+    4. 先试试看(不复制)  {prog} backup --dry-run
+    5. 真正备份一次     {prog} backup --full
+    6. 设成开机自动跑   {prog} service on
 
-  config show         查看配置
-  config validate     验证配置
-  config paths        查看路径
-  config init         生成配置模板
+  ─────────────────────────────────────────
 
-  service on          安装并启动服务
-  service off         停止并卸载服务
-  service status      查看服务状态
-  service restart     重启服务
+  📌 日常用得最多的命令:
 
-━━━ 重要提醒 ━━━
+    {prog} backup               跑一次增量备份
+    {prog} backup --full        全量备份（第一次建议用这个）
+    {prog} service on           设成开机自动备份，装完就不用管了
+    {prog} doctor               检查一下状态，看看有没有问题
+    {prog} last-run             看看上次备份的情况
 
-• 本工具只能备份已落盘的文件
-• Adobe 应用内存中尚未保存的内容无法被外部工具捕获
-• 建议配合 Adobe 自身的自动保存一起使用
-• 本工具是兜底系统，不是替代方案
+  📌 管理类命令:
+
+    {prog} config show          看当前配置
+    {prog} service status       看看服务跑没跑
+    {prog} service off          不想用了？关掉服务
+
+  ─────────────────────────────────────────
+
+  ⚠️  有件事要提前说清楚:
+
+  Adoback 只能备份已经保存到硬盘上的文件。
+  如果你在 PS 里画了一个小时但一直没按 Cmd+S，
+  那这部分内容是没法被任何外部工具备份到的。
+
+  建议: 打开 Adobe 自带的自动保存，再加上 Adoback，双重保险。
 """
 
 
@@ -1669,17 +1818,16 @@ def cmd_guide(args, cfg):
 def _interactive_guide():
     """交互式新手引导。"""
     printout("")
-    printout("╔════════════════════════════════════════════╗")
-    printout("║    Adoback 交互式引导           ║")
-    printout("╚════════════════════════════════════════════╝")
+    printbox("Adoback 交互式引导")
     printout("")
+    printdim("    一步一步来，帮你把备份配好 ~")
 
     # 1. 检查配置文件
     printstep(1, "检查配置文件")
     config_path = DEFAULT_CONFIG_PATH
     if config_path.exists():
-        printout(f"    ✓ 配置文件已存在: {config_path}")
-        printout(f"    是否重新生成? (y/N) ", )
+        printinfo(f"配置文件已存在: {config_path}")
+        printout(f"  {_c(_CYAN, '?')} 要重新生成吗？(y/N) ", )
         try:
             ans = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1692,75 +1840,33 @@ def _interactive_guide():
                 log_dir=str(DEFAULT_LOG_DIR),
             )
             config_path.write_text(content, encoding="utf-8")
-            printout(f"    ✓ 已重新生成")
+            printinfo("已重新生成")
     else:
-        printout(f"    配置文件不存在，正在生成...")
+        printdim("    配置文件不存在，帮你生成一个...")
         config_path.parent.mkdir(parents=True, exist_ok=True)
         content = CONFIG_TEMPLATE.format(
             state_dir=str(DEFAULT_STATE_DIR),
             log_dir=str(DEFAULT_LOG_DIR),
         )
         config_path.write_text(content, encoding="utf-8")
-        printout(f"    ✓ 已生成: {config_path}")
+        printinfo(f"已生成: {config_path}")
 
-    # 2. 设置源目录
-    printout("")
+    # 2. 设置源目录（多个）
     printstep(2, "设置源目录")
-    printout(f"    请输入你的 Adobe 项目文件目录")
-    printout(f"    示例: /Users/{os.environ.get('USER', 'you')}/Documents/Adobe")
-    printout(f"    源目录: ", )
-    try:
-        src = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        printout("")
-        return
+    roots = _ask_source_dirs()
 
     # 3. 设置目标目录
-    printout("")
     printstep(3, "设置目标目录")
-    printout(f"    请输入备份输出目录 (不能与源目录相同)")
-    printout(f"    示例: /Volumes/BackupDisk/AdobeBackup")
-    printout(f"    目标目录: ", )
-    try:
-        dst = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        printout("")
-        return
+    dst = _ask_dest_dir()
 
-    if src and dst:
-        # 写入配置
+    if roots and dst:
         try:
-            text = config_path.read_text(encoding="utf-8")
-            # 简单替换 root = "" 行
-            lines = text.split("\n")
-            new_lines = []
-            src_set = False
-            dst_set = False
-            in_source = False
-            in_dest = False
-            for line in lines:
-                stripped = line.strip()
-                if stripped == "[source]":
-                    in_source = True
-                    in_dest = False
-                elif stripped == "[destination]":
-                    in_source = False
-                    in_dest = True
-                elif stripped.startswith("[") and stripped.endswith("]"):
-                    in_source = False
-                    in_dest = False
-
-                if in_source and stripped.startswith("root") and "=" in stripped and not src_set:
-                    new_lines.append(f'root = "{src}"')
-                    src_set = True
-                elif in_dest and stripped.startswith("root") and "=" in stripped and not dst_set:
-                    new_lines.append(f'root = "{dst}"')
-                    dst_set = True
-                else:
-                    new_lines.append(line)
-            config_path.write_text("\n".join(new_lines), encoding="utf-8")
+            _write_roots_to_config(config_path, roots, dst)
             printout("")
-            printinfo("✓ 配置已更新")
+            printinfo("配置已更新")
+            for r in roots:
+                printdim(f"    源: {r}")
+            printdim(f"    目标: {dst}")
         except Exception as e:
             printerr(f"写入配置失败: {e}")
             return
@@ -1862,7 +1968,8 @@ def cmd_report(args, cfg):
 
 def cmd_install(args, cfg):
     """一键安装。"""
-    printtitle("Adoback 安装")
+    printout("")
+    printbox("Adoback 安装", style="single")
 
     # 1. 创建目录
     printstep(1, "创建目录结构")
@@ -1928,8 +2035,9 @@ def cmd_install(args, cfg):
 
 def cmd_uninstall(args, cfg):
     """卸载。"""
-    printout("Adoback 卸载")
-    printout("=" * 40)
+    printout("")
+    printbox("Adoback 卸载", style="single")
+    printout("")
 
     # 停止并卸载服务
     printstep(1, "停止服务")
@@ -1967,15 +2075,270 @@ def cmd_uninstall(args, cfg):
 
 
 # ─────────────────────────────────────────────
+# update 自动更新
+# ─────────────────────────────────────────────
+
+def cmd_update(args, cfg):
+    """检查并自动更新到最新版本。"""
+    check_only = getattr(args, "check", False)
+
+    printout("")
+    printbox("Adoback 更新", style="single")
+
+    # 1. 当前版本
+    printstep(1, "当前版本")
+    printinfo(f"v{VERSION}")
+
+    # 2. 检查最新版本
+    printstep(2, "检查最新版本")
+    try:
+        release = _github_get_json(GITHUB_API_LATEST)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            printerr("该仓库尚未发布任何 Release")
+        else:
+            printerr(f"GitHub API 返回错误: HTTP {e.code}")
+        printdim(f"    https://github.com/{GITHUB_REPO}/releases")
+        sys.exit(EXIT_RUNTIME)
+    except urllib.error.URLError as e:
+        printerr(f"无法连接 GitHub: {e.reason}")
+        printdim("    请检查网络连接，或手动前往:")
+        printdim(f"    https://github.com/{GITHUB_REPO}/releases")
+        sys.exit(EXIT_RUNTIME)
+    except Exception as e:
+        printerr(f"获取版本信息失败: {e}")
+        sys.exit(EXIT_RUNTIME)
+
+    latest_tag = release.get("tag_name", "").lstrip("v")
+    if not latest_tag:
+        printerr("无法解析最新版本号")
+        sys.exit(EXIT_RUNTIME)
+
+    printinfo(f"最新版本: v{latest_tag}")
+
+    # 3. 比较版本
+    try:
+        local_ver = _parse_version(VERSION)
+        remote_ver = _parse_version(latest_tag)
+    except (ValueError, TypeError):
+        printerr("版本号格式异常")
+        sys.exit(EXIT_RUNTIME)
+
+    if remote_ver <= local_ver:
+        printout("")
+        printout(f"  {_c(_GREEN, _ICON_SPARK)} {_c(_BOLD, '已是最新版本，无需更新')}")
+        printout("")
+        return
+
+    printout("")
+    printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 发现新版本: {_c(_DIM, 'v' + VERSION)} → {_c(_GREEN, _c(_BOLD, 'v' + latest_tag))}")
+
+    # 仅检查模式
+    if check_only:
+        printout("")
+        printout(f"  运行 {_c(_CYAN, _prog() + ' update')} 进行更新")
+        printout("")
+        return
+
+    # 4. 确定下载地址和目标路径
+    target_path = Path(_get_bin_path()).resolve()
+
+    if _is_frozen():
+        # 二进制模式: 从 Release 下载架构匹配的二进制
+        asset_name = _detect_asset_name()
+        assets = release.get("assets", [])
+        asset = None
+        for a in assets:
+            if asset_name.lower() in a["name"].lower():
+                asset = a
+                break
+        if not asset:
+            printerr(f"未找到匹配的二进制: {asset_name}")
+            printdim(f"    可用资源: {', '.join(a['name'] for a in assets)}")
+            printdim(f"    请手动前往 https://github.com/{GITHUB_REPO}/releases 下载")
+            sys.exit(EXIT_RUNTIME)
+        download_url = asset["browser_download_url"]
+        download_name = asset["name"]
+    else:
+        # 源码模式: 从 main 分支下载 adoback.py
+        download_url = GITHUB_RAW_SOURCE
+        download_name = "adoback.py"
+
+    # 5. 下载到临时文件
+    printstep(3, "下载更新")
+    printdim(f"    {download_name}")
+    tmp_fd, tmp_path_str = tempfile.mkstemp(
+        dir=str(target_path.parent),
+        prefix=".adoback-update-",
+    )
+    tmp_path = Path(tmp_path_str)
+    try:
+        os.close(tmp_fd)
+        _github_download(download_url, tmp_path)
+        tmp_path.chmod(0o755)
+        printinfo("下载完成")
+
+        # 6. 验证
+        printstep(4, "验证")
+        if _is_frozen():
+            result = subprocess.run(
+                ["file", str(tmp_path)],
+                capture_output=True, text=True,
+            )
+            if "Mach-O" not in result.stdout:
+                raise RuntimeError("下载的文件不是有效的 macOS 二进制")
+            printinfo("二进制验证通过 (Mach-O)")
+        else:
+            content = tmp_path.read_text(encoding="utf-8")
+            if "VERSION" not in content or "def main" not in content:
+                raise RuntimeError("下载的源码文件不完整")
+            printinfo("源码验证通过")
+
+        # 7. 原子替换
+        printstep(5, "替换文件")
+        os.replace(str(tmp_path), str(target_path))
+        printinfo(f"已替换: {target_path}")
+
+        # 同步符号链接（如果有）
+        link_path = Path.home() / ".local" / "bin" / "adoback"
+        if link_path.is_symlink():
+            # 确保符号链接指向正确
+            if link_path.resolve() != target_path:
+                try:
+                    link_path.unlink()
+                    link_path.symlink_to(target_path)
+                except OSError:
+                    pass
+
+        printout("")
+        printbar("═")
+        printout(f"  {_c(_GREEN, _ICON_SPARK)} {_c(_BOLD, _c(_GREEN, '更新完成!'))}  v{VERSION} → v{latest_tag}")
+        printbar("═")
+        printout("")
+
+    except Exception as e:
+        # 清理临时文件
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        printerr(f"更新失败: {e}")
+        sys.exit(EXIT_RUNTIME)
+
+
+# ─────────────────────────────────────────────
 # setup 一键初始化
 # ─────────────────────────────────────────────
+
+def _write_roots_to_config(config_path: Path, roots: list[str], dst: str):
+    """把多个源目录和目标目录写入 config.toml。"""
+    text = config_path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    new_lines = []
+    roots_set = dst_set = False
+    in_source = in_dest = False
+    skip_until_next_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "[source]":
+            in_source, in_dest = True, False
+            skip_until_next_section = False
+        elif stripped == "[destination]":
+            in_source, in_dest = False, True
+            skip_until_next_section = False
+        elif stripped.startswith("[") and stripped.endswith("]"):
+            in_source = in_dest = False
+            skip_until_next_section = False
+
+        if skip_until_next_section:
+            # 跳过旧的 roots 多行值
+            if stripped.startswith("]") or stripped.startswith('"') or stripped == "":
+                if stripped.startswith("]"):
+                    skip_until_next_section = False
+                continue
+
+        if in_source and stripped.startswith("roots") and "=" in stripped and not roots_set:
+            # 写入新的 roots 列表
+            if len(roots) == 1:
+                new_lines.append(f'roots = ["{roots[0]}"]')
+            else:
+                new_lines.append("roots = [")
+                for r in roots:
+                    new_lines.append(f'    "{r}",')
+                new_lines.append("]")
+            roots_set = True
+            # 如果旧值是多行，跳过直到 ]
+            if "[" in stripped and "]" not in stripped:
+                skip_until_next_section = True
+            continue
+        elif in_dest and stripped.startswith("root") and "=" in stripped and not dst_set:
+            new_lines.append(f'root = "{dst}"')
+            dst_set = True
+            continue
+
+        new_lines.append(line)
+    config_path.write_text("\n".join(new_lines), encoding="utf-8")
+
+
+def _ask_source_dirs() -> list[str]:
+    """交互式询问用户的源目录（支持多个）。"""
+    user = os.environ.get("USER", "you")
+    printout("")
+    printout(f"  {_c(_CYAN, '?')} 你的 Adobe 项目文件放在哪？")
+    printdim(f"    就是你平时存 PSD、AI、PR 工程的目录")
+    printdim(f"    例如: /Users/{user}/Documents/Adobe")
+    printout("")
+
+    roots = []
+    while True:
+        if not roots:
+            printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 输入源目录路径: ", )
+        else:
+            printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 再添加一个目录 (直接回车跳过): ", )
+        try:
+            path = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            printout("")
+            break
+        if not path:
+            if roots:
+                break
+            printout(f"    {_c(_YELLOW, '至少需要输入一个目录哦')}")
+            continue
+        # 展开 ~ 并验证
+        expanded = str(Path(path).expanduser())
+        roots.append(expanded)
+        printinfo(f"已添加: {expanded}")
+        if len(roots) < 10:
+            printout(f"    {_c(_DIM, '还要添加其他目录吗？比如 PS 一个、PR 一个')}")
+
+    return roots
+
+
+def _ask_dest_dir() -> str:
+    """交互式询问用户的备份目标目录。"""
+    printout("")
+    printout(f"  {_c(_CYAN, '?')} 备份存到哪？")
+    printdim(f"    建议用外置硬盘或单独的分区")
+    printdim(f"    例如: /Volumes/BackupDisk/AdobeBackup")
+    printout("")
+    printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 输入目标目录路径: ", )
+    try:
+        dst = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        printout("")
+        return ""
+    if dst:
+        dst = str(Path(dst).expanduser())
+    return dst
+
 
 def cmd_setup(args, cfg):
     """一键初始化：安装 + 生成配置 + 交互引导 + 自检。"""
     printout("")
-    printtitle("╔══════════════════════════════════════════════╗")
-    printtitle("║    Adoback · 一键初始化            ║")
-    printtitle("╚══════════════════════════════════════════════╝")
+    printbox("Adoback · 一键初始化")
+    printout("")
+    printdim("    跟着提示走，几步就搞定 ~")
 
     # 1. 安装程序
     printstep(1, "安装程序")
@@ -2018,50 +2381,23 @@ def cmd_setup(args, cfg):
         config_path.write_text(content, encoding="utf-8")
         printinfo(f"已生成: {config_path}")
 
-    # 3. 交互设置源/目标目录
+    # 3. 交互设置源目录（多个）+ 目标目录
     printstep(3, "设置备份路径")
-    src = ""
-    dst = ""
-    try:
-        printout(f"    Adobe 项目文件目录 (源目录):")
-        printdim(f"    示例: /Users/{os.environ.get('USER', 'you')}/Documents/Adobe")
-        printout(f"    > ", )
-        src = input().strip()
-        printout(f"    备份输出目录 (不能与源目录相同):")
-        printdim(f"    示例: /Volumes/BackupDisk/AdobeBackup")
-        printout(f"    > ", )
-        dst = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        printout("")
+    roots = _ask_source_dirs()
+    dst = _ask_dest_dir()
 
-    if src and dst:
+    if roots and dst:
         try:
-            text = config_path.read_text(encoding="utf-8")
-            lines = text.split("\n")
-            new_lines = []
-            src_set = dst_set = False
-            in_source = in_dest = False
-            for line in lines:
-                stripped = line.strip()
-                if stripped == "[source]":
-                    in_source, in_dest = True, False
-                elif stripped == "[destination]":
-                    in_source, in_dest = False, True
-                elif stripped.startswith("[") and stripped.endswith("]"):
-                    in_source = in_dest = False
-
-                if in_source and stripped.startswith("root") and "=" in stripped and not src_set:
-                    new_lines.append(f'root = "{src}"')
-                    src_set = True
-                elif in_dest and stripped.startswith("root") and "=" in stripped and not dst_set:
-                    new_lines.append(f'root = "{dst}"')
-                    dst_set = True
-                else:
-                    new_lines.append(line)
-            config_path.write_text("\n".join(new_lines), encoding="utf-8")
+            _write_roots_to_config(config_path, roots, dst)
+            printout("")
             printinfo("备份路径已写入配置")
+            for r in roots:
+                printdim(f"    源: {r}")
+            printdim(f"    目标: {dst}")
         except Exception as e:
             printerr(f"写入配置失败: {e}")
+    elif roots or dst:
+        printwarn("源目录和目标目录都需要填写才能保存")
 
     # 4. PATH 环境变量
     printstep(4, "环境变量")
@@ -2090,14 +2426,14 @@ def cmd_setup(args, cfg):
 
     # 完成
     printout("")
-    printtitle("╔══════════════════════════════════════════════╗")
-    printtitle(f"║  {_c(_GREEN, '✓ 初始化完成!')}                                   ║")
-    printtitle("╚══════════════════════════════════════════════╝")
+    printbar("═")
+    printout(f"  {_c(_GREEN, _ICON_SPARK)} {_c(_BOLD, _c(_GREEN, '初始化完成!'))}")
+    printbar("═")
     printout("")
-    printout("  下一步:")
-    printout(f"    {_prog()} backup --dry-run   试运行")
-    printout(f"    {_prog()} backup --full      全量备份")
-    printout(f"    {_prog()} service on         安装并启动开机自启服务")
+    printout(f"  {_c(_DIM, '下一步:')}")
+    printout(f"    {_c(_CYAN, _prog() + ' backup --dry-run')}   先试试看（不复制文件）")
+    printout(f"    {_c(_CYAN, _prog() + ' backup --full')}      跑一次全量备份")
+    printout(f"    {_c(_CYAN, _prog() + ' service on')}         设成开机自动备份，装完就不用管了")
     printout("")
 
 
@@ -2181,10 +2517,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list", dest="list_all", action="store_true", help="列出所有报告")
     p.add_argument("--format", choices=["text", "json"], default="text", help="报告格式")
 
-    # ── 安装/卸载 ──
+    # ── 安装/卸载/更新 ──
     sub.add_parser("install", help="安装到本地 (setup 已包含此功能)")
     p = sub.add_parser("uninstall", help="卸载")
     p.add_argument("-y", "--yes", action="store_true", help="跳过确认")
+
+    p = sub.add_parser("update", help="检查并更新到最新版本")
+    p.add_argument("--check", action="store_true", help="仅检查是否有新版本，不更新")
 
     # ── 向后兼容隐藏别名 ──
     # 旧命令仍可用，但不在 help 中显示
@@ -2213,14 +2552,13 @@ def build_parser() -> argparse.ArgumentParser:
 def _first_run_hint():
     """首次运行提示：无配置文件时引导用户 setup。"""
     printout("")
-    printtitle("Adoback")
-    printout(f"  版本 {VERSION}")
+    printbox(f"Adoback v{VERSION}")
     printout("")
-    printout("  看起来你是第一次运行，建议执行:")
-    printout(f"    {_c(_CYAN, _prog() + ' setup')}    一键初始化")
+    printout(f"  {_c(_CYAN, '?')} 看起来你是第一次运行")
     printout("")
-    printout("  或者查看帮助:")
-    printout(f"    {_prog()} --help")
+    printout(f"    {_c(_GREEN, _ICON_ARROW)} {_c(_BOLD, _prog() + ' setup')}     一键初始化（推荐）")
+    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} guide     查看新手引导")
+    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} --help    查看所有命令")
     printout("")
 
 
@@ -2271,7 +2609,7 @@ def main():
             args.json_report = getattr(args, "json_report", False)
 
     # ── 不需要配置文件的命令 ──
-    no_config_commands = {"setup", "config", "guide", "install"}
+    no_config_commands = {"setup", "config", "guide", "install", "update"}
     needs_config = cmd not in no_config_commands
 
     cfg = None
@@ -2402,6 +2740,10 @@ def main():
 
         elif cmd == "uninstall":
             cmd_uninstall(args, cfg)
+
+        # ── update ──
+        elif cmd == "update":
+            cmd_update(args, cfg)
 
         else:
             parser.print_help()

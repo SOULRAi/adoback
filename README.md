@@ -101,7 +101,11 @@ adoback service on                     # 开机自启
 
 ```toml
 [source]
-root = "/Users/你的用户名/Documents/Adobe项目"
+# 支持多个目录
+roots = [
+    "/Users/你的用户名/Documents/Photoshop",
+    "/Users/你的用户名/Documents/Premiere"
+]
 
 [destination]
 root = "/Volumes/BackupDisk/AdobeBackup"
@@ -111,7 +115,7 @@ root = "/Volumes/BackupDisk/AdobeBackup"
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `source.root` | （必填） | 待备份的源目录 |
+| `source.roots` | （必填） | 待备份的源目录列表（支持多个） |
 | `destination.root` | （必填） | 备份输出目录 |
 | `destination.layout` | `snapshot` | `snapshot`（按时间戳快照）或 `mirror`（镜像覆盖） |
 | `performance.workers` | `4` | 并发复制线程数 |
@@ -167,6 +171,8 @@ adoback report --list        # 列出所有报告
 ### 其他
 
 ```bash
+adoback update               # 一键更新到最新版本
+adoback update --check       # 仅检查是否有新版本
 adoback guide                # 新手引导
 adoback guide --interactive  # 交互式引导
 adoback uninstall            # 卸载
@@ -222,7 +228,7 @@ adoback uninstall            # 卸载
 
 ## 项目状态
 
-当前版本 **v0.3.0**，处于**可用原型**阶段。核心备份、守护、服务化功能已验证可用。
+当前版本 **v0.4.0**，处于**可用原型**阶段。核心备份、守护、服务化功能已验证可用。
 
 ### 已实现
 
@@ -247,6 +253,8 @@ adoback uninstall            # 卸载
 - [x] PyInstaller 零依赖打包
 - [x] 一键安装脚本
 - [x] npm 包分发
+- [x] 多源目录支持
+- [x] 美化 CLI 界面（Unicode 边框对齐、彩色图标）
 
 ### 计划中
 
