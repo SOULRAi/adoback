@@ -1,0 +1,38 @@
+{
+  "name": "adoback",
+  "version": "0.3.0",
+  "description": "Adoback — macOS 本地 Adobe 项目文件备份守护工具",
+  "bin": {
+    "adoback": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node ./scripts/postinstall.js"
+  },
+  "os": [
+    "darwin"
+  ],
+  "keywords": [
+    "adobe",
+    "backup",
+    "photoshop",
+    "illustrator",
+    "premiere",
+    "after-effects",
+    "indesign",
+    "macos",
+    "daemon",
+    "launchd",
+    "adoback"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SOULRAi/adoback.git"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "fallback/"
+  ]
+}

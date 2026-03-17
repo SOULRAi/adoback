@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.spec
+build/
+dist/
+*.tgz
+.DS_Store
+node_modules/
+npm/fallback/*.py
+npm/bin/.mode
+npm/bin/adoback-bin
