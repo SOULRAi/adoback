@@ -599,15 +599,42 @@ _CYAN = "\033[36m"
 _MAGENTA = "\033[35m"
 _BLUE = "\033[34m"
 _DIM = "\033[2m"
+_UNDERLINE = "\033[4m"
+_ITALIC = "\033[3m"
 _RESET = "\033[0m"
 
 # 图标
 _ICON_OK = "✔"
 _ICON_ERR = "✘"
 _ICON_WARN = "⚠"
-_ICON_ARROW = "›"
+_ICON_ARROW = "❯"
 _ICON_DOT = "·"
 _ICON_SPARK = "✦"
+_ICON_BOLT = "⚡"
+_ICON_FOLDER = "📁"
+_ICON_DISK = "💾"
+_ICON_CLOCK = "⏱"
+
+# ASCII Art Logo
+_LOGO = r"""
+     █████╗ ██████╗  ██████╗ ██████╗  █████╗  ██████╗██╗  ██╗
+    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔════╝██║ ██╔╝
+    ███████║██║  ██║██║   ██║██████╔╝███████║██║     █████╔╝
+    ██╔══██║██║  ██║██║   ██║██╔══██╗██╔══██║██║     ██╔═██╗
+    ██║  ██║██████╔╝╚██████╔╝██████╔╝██║  ██║╚██████╗██║  ██╗
+    ╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝"""
+
+# 渐变色阶 (紫 → 蓝 → 青)
+_GRADIENT_COLORS = [
+    "\033[38;5;135m",  # 紫色
+    "\033[38;5;134m",
+    "\033[38;5;98m",
+    "\033[38;5;62m",   # 蓝紫
+    "\033[38;5;68m",
+    "\033[38;5;32m",   # 青蓝
+    "\033[38;5;38m",
+    "\033[38;5;44m",   # 青色
+]
 
 
 def _use_color() -> bool:
@@ -616,6 +643,53 @@ def _use_color() -> bool:
 
 def _c(code: str, text: str) -> str:
     return f"{code}{text}{_RESET}" if _use_color() else text
+
+
+def _gradient_line(text: str, colors: list[str] = None) -> str:
+    """对一行文本应用渐变色。"""
+    if not _use_color() or not text.strip():
+        return text
+    if colors is None:
+        colors = _GRADIENT_COLORS
+    result = []
+    visible_chars = [ch for ch in text if ch != ' ' and ch.strip()]
+    total_visible = len(visible_chars)
+    if total_visible == 0:
+        return text
+    vi = 0
+    for ch in text:
+        if ch == ' ' or not ch.strip():
+            result.append(ch)
+        else:
+            idx = int(vi / max(total_visible - 1, 1) * (len(colors) - 1))
+            idx = min(idx, len(colors) - 1)
+            result.append(f"{colors[idx]}{ch}")
+            vi += 1
+    result.append(_RESET)
+    return "".join(result)
+
+
+def _print_logo(subtitle: str = ""):
+    """打印渐变色 ASCII Art Logo。"""
+    if not _use_color():
+        for line in _LOGO.strip().splitlines():
+            print(line)
+        if subtitle:
+            print(f"    {subtitle}")
+        return
+
+    lines = _LOGO.strip().splitlines()
+    for line in lines:
+        print(_gradient_line(line))
+
+    # 副标题行
+    if subtitle:
+        # 居中对齐
+        logo_width = max(len(l) for l in lines)
+        sub_vis = _visible_len(subtitle)
+        pad = (logo_width - sub_vis) // 2
+        print(f"{' ' * pad}{_c(_DIM, subtitle)}")
+    print()
 
 
 def _visible_len(s: str) -> int:
@@ -660,10 +734,12 @@ def printtitle(msg: str):
     print(f"\n{_c(_BOLD, msg)}")
 
 
-def printbox(title: str, width: int = 48, style: str = "double"):
+def printbox(title: str, width: int = 52, style: str = "double"):
     """打印对齐的 Unicode 边框标题。"""
     if style == "double":
         tl, tr, bl, br, h, v = "╔", "╗", "╚", "╝", "═", "║"
+    elif style == "heavy":
+        tl, tr, bl, br, h, v = "┏", "┓", "┗", "┛", "━", "┃"
     else:
         tl, tr, bl, br, h, v = "┌", "┐", "└", "┘", "─", "│"
     inner = width - 2
@@ -681,8 +757,38 @@ def printbox(title: str, width: int = 48, style: str = "double"):
     printout(bot)
 
 
-def printbar(char: str = "─", width: int = 44):
+def printbar(char: str = "─", width: int = 48):
     printout(f"  {_c(_DIM, char * width)}")
+
+
+def _prompt(msg: str, default: str = "") -> str:
+    """带样式的交互式输入提示。"""
+    arrow = _c(_MAGENTA, _ICON_ARROW)
+    hint = f" {_c(_DIM, f'({default})')}" if default else ""
+    sys.stdout.write(f"\n  {arrow} {_c(_BOLD, msg)}{hint} ")
+    sys.stdout.flush()
+    try:
+        val = input().strip()
+        return val if val else default
+    except (EOFError, KeyboardInterrupt):
+        printout("")
+        return default
+
+
+def _confirm(msg: str, default: bool = False) -> bool:
+    """带样式的 y/N 确认提示。"""
+    yn = "Y/n" if default else "y/N"
+    arrow = _c(_CYAN, "?")
+    sys.stdout.write(f"  {arrow} {msg} ({yn}) ")
+    sys.stdout.flush()
+    try:
+        val = input().strip().lower()
+        if not val:
+            return default
+        return val in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        printout("")
+        return default
 
 
 # ─────────────────────────────────────────────
@@ -2089,8 +2195,7 @@ def cmd_guide(args, cfg):
 def _interactive_guide():
     """交互式新手引导。"""
     printout("")
-    printbox("Adoback 交互式引导")
-    printout("")
+    _print_logo(f"v{VERSION} · 交互式引导")
     printdim("    一步一步来，帮你把备份配好 ~")
 
     # 1. 检查配置文件
@@ -2098,13 +2203,7 @@ def _interactive_guide():
     config_path = DEFAULT_CONFIG_PATH
     if config_path.exists():
         printinfo(f"配置文件已存在: {config_path}")
-        printout(f"  {_c(_CYAN, '?')} 要重新生成吗？(y/N) ", )
-        try:
-            ans = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            printout("")
-            return
-        if ans == "y":
+        if _confirm("要重新生成吗？"):
             config_path.parent.mkdir(parents=True, exist_ok=True)
             content = CONFIG_TEMPLATE.format(
                 state_dir=str(DEFAULT_STATE_DIR),
@@ -2317,11 +2416,7 @@ def cmd_uninstall(args, cfg):
     # 询问是否删除数据
     if not getattr(args, "yes", False):
         printout("")
-        printout(f"  {_c(_CYAN, '?')} 是否同时删除所有备份数据和状态? (y/N) ", )
-        try:
-            ans = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = "n"
+        ans = "y" if _confirm("是否同时删除所有备份数据和状态?") else "n"
     else:
         ans = "y"
 
@@ -2608,14 +2703,7 @@ def cmd_restore(args, cfg):
         printout(f"  {_c(_YELLOW, _ICON_WARN)} 目标文件已存在，将先备份当前版本")
 
     printout("")
-    printout(f"  {_c(_CYAN, '?')} 确认恢复? (y/N): ", )
-    try:
-        confirm = input().strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        printout("")
-        return
-
-    if confirm not in ("y", "yes"):
+    if not _confirm("确认恢复?"):
         printinfo("已取消恢复")
         return
 
@@ -2788,13 +2876,7 @@ def cmd_clean(args, cfg):
         # ── 确认 ──
         if not force:
             printout("")
-            printout(f"  {_c(_CYAN, '?')} 确认清理? 删除后不可恢复 (y/N): ", )
-            try:
-                confirm = input().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                printout("")
-                return
-            if confirm not in ("y", "yes"):
+            if not _confirm("确认清理? 删除后不可恢复"):
                 printinfo("已取消清理")
                 return
 
@@ -3047,25 +3129,20 @@ def _ask_source_dirs() -> list[str]:
     """交互式询问用户的源目录（支持多个）。"""
     user = os.environ.get("USER", "you")
     printout("")
-    printout(f"  {_c(_CYAN, '?')} 你的 Adobe 项目文件放在哪？")
+    printout(f"  {_c(_CYAN, _ICON_FOLDER)} {_c(_BOLD, '你的 Adobe 项目文件放在哪？')}")
     printdim(f"    就是你平时存 PSD、AI、PR 工程的目录")
     printdim(f"    例如: /Users/{user}/Documents/Adobe")
-    printout("")
 
     roots = []
     while True:
         if not roots:
-            printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 输入源目录路径: ", )
+            path = _prompt("源目录路径")
         else:
-            printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 再添加一个目录 (直接回车跳过): ", )
-        try:
-            path = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            printout("")
-            break
-        if not path:
-            if roots:
+            path = _prompt("再添加一个目录", "回车跳过")
+            if path == "回车跳过" or not path:
                 break
+
+        if not path:
             printout(f"    {_c(_YELLOW, '至少需要输入一个目录哦')}")
             continue
         # 展开 ~ 并验证
@@ -3073,7 +3150,7 @@ def _ask_source_dirs() -> list[str]:
         roots.append(expanded)
         printinfo(f"已添加: {expanded}")
         if len(roots) < 10:
-            printout(f"    {_c(_DIM, '还要添加其他目录吗？比如 PS 一个、PR 一个')}")
+            printdim(f"    还要添加其他目录吗？比如 PS 一个、PR 一个")
 
     return roots
 
@@ -3081,16 +3158,10 @@ def _ask_source_dirs() -> list[str]:
 def _ask_dest_dir() -> str:
     """交互式询问用户的备份目标目录。"""
     printout("")
-    printout(f"  {_c(_CYAN, '?')} 备份存到哪？")
+    printout(f"  {_c(_CYAN, _ICON_DISK)} {_c(_BOLD, '备份存到哪？')}")
     printdim(f"    建议用外置硬盘或单独的分区")
     printdim(f"    例如: /Volumes/BackupDisk/AdobeBackup")
-    printout("")
-    printout(f"  {_c(_MAGENTA, _ICON_ARROW)} 输入目标目录路径: ", )
-    try:
-        dst = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        printout("")
-        return ""
+    dst = _prompt("目标目录路径")
     if dst:
         dst = str(Path(dst).expanduser())
     return dst
@@ -3099,8 +3170,7 @@ def _ask_dest_dir() -> str:
 def cmd_setup(args, cfg):
     """一键初始化：安装 + 生成配置 + 交互引导 + 自检。"""
     printout("")
-    printbox("Adoback · 一键初始化")
-    printout("")
+    _print_logo(f"v{VERSION} · 一键初始化")
     printdim("    跟着提示走，几步就搞定 ~")
 
     # 1. 安装程序
@@ -3540,16 +3610,10 @@ def cmd_status(args, cfg):
 
         # ── 标题 ──
         lines.append("")
-        title = f" ✦ Adoback v{VERSION} · 状态面板 ✦ "
-        inner_w = 50
-        tl, tr, bl, br, h, v = "╔", "╗", "╚", "╝", "═", "║"
-        vis = _visible_len(title)
-        pad_total = inner_w - vis
-        pad_l = pad_total // 2
-        pad_r = pad_total - pad_l
-        lines.append(f"  {_c(_CYAN, tl + h * inner_w + tr)}")
-        lines.append(f"  {_c(_CYAN, v)}{' ' * pad_l}{_c(_BOLD, title)}{' ' * pad_r}{_c(_CYAN, v)}")
-        lines.append(f"  {_c(_CYAN, bl + h * inner_w + br)}")
+        # 小型 logo 用于状态面板 (避免太长)
+        mini_logo = f"  {_c(_BOLD, _gradient_line('◈ ADOBACK'))}  {_c(_DIM, f'v{VERSION} · 状态面板')}"
+        lines.append(mini_logo)
+        lines.append(f"  {_c(_DIM, '━' * 52)}")
         lines.append(f"  {_c(_DIM, now_str)}")
 
         # ── 1. 服务状态 ──
@@ -4106,13 +4170,17 @@ def build_parser() -> argparse.ArgumentParser:
 def _first_run_hint():
     """首次运行提示：无配置文件时引导用户 setup。"""
     printout("")
-    printbox(f"Adoback v{VERSION}")
+    _print_logo(f"v{VERSION} · macOS Adobe 项目文件备份守护")
+    printbar("━", 58)
     printout("")
-    printout(f"  {_c(_CYAN, '?')} 看起来你是第一次运行")
+    printout(f"  {_c(_CYAN, '?')} 看起来你是第一次运行 Adoback")
     printout("")
-    printout(f"    {_c(_GREEN, _ICON_ARROW)} {_c(_BOLD, _prog() + ' setup')}     一键初始化（推荐）")
-    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} guide     查看新手引导")
-    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} --help    查看所有命令")
+    printout(f"    {_c(_GREEN, _ICON_ARROW)} {_c(_BOLD, _prog() + ' setup')}        一键初始化（推荐 ⭐）")
+    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} guide        查看新手引导")
+    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} --help       查看所有命令")
+    printout("")
+    printbar("━", 58)
+    printdim("    开源: github.com/SOULRAi/adoback")
     printout("")
 
 
@@ -4126,6 +4194,11 @@ def main():
         if not config_found:
             _first_run_hint()
         else:
+            # 已有配置，显示迷你 banner + help
+            printout("")
+            printout(f"  {_gradient_line('◈ ADOBACK')}  {_c(_DIM, f'v{VERSION}')}")
+            printout(f"  {_c(_DIM, '━' * 52)}")
+            printout("")
             parser.print_help()
         sys.exit(0)
 
