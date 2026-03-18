@@ -68,7 +68,13 @@ npx adoback setup
 npm i -g adoback && adoback setup
 ```
 
-#### 🟡 curl（无需任何前置环境）
+#### 🟡 Homebrew
+
+```bash
+brew tap SOULRAi/tap && brew install adoback
+```
+
+#### 🔵 curl（无需任何前置环境）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SOULRAi/adoback/main/install.sh | bash
@@ -301,11 +307,12 @@ adoback uninstall            #   卸载
 - [x] 多源目录 + 美化 CLI
 - [x] 备份恢复 (restore) + 空间清理 (clean)
 - [x] 一键更新 (update)
-- [ ] 🔜 macOS 桌面通知
-- [ ] 🔜 忽略规则 (backup.ignore)
-- [ ] TUI 实时仪表盘
-- [ ] FSEvents 文件监听（替代轮询）
-- [ ] Homebrew Formula
+- [x] macOS 桌面通知
+- [x] 忽略规则 (.adobackignore)
+- [x] TUI 状态面板 (status)
+- [x] FSEvents 实时监听 (watch)
+- [x] Claude Code 风格面板界面
+- [x] Homebrew Formula + GitHub Actions CI/CD
 
 ## 🤝 它不能做什么
 

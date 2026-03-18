@@ -1,6 +1,6 @@
 {
   "name": "adoback",
-  "version": "0.5.6",
+  "version": "0.5.8",
   "description": "Adoback — macOS 本地 Adobe 项目文件备份守护工具",
   "bin": {
     "adoback": "bin/cli.js"

@@ -35,7 +35,7 @@ from pathlib import Path
 # 常量
 # ─────────────────────────────────────────────
 
-VERSION = "0.5.6"
+VERSION = "0.5.8"
 APP_NAME = "adoback"
 SERVICE_LABEL = "com.local.adoback"
 GITHUB_REPO = "SOULRAi/adoback"

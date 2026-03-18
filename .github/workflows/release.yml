@@ -1,0 +1,161 @@
+# Adoback — 自动构建 + 发布
+# 触发方式: push tag (v*)
+#   git tag v0.5.8
+#   git push origin v0.5.8
+#
+# 工作流:
+#   1. macOS 上用 PyInstaller 构建 arm64 和 x86_64 两个二进制
+#   2. 创建 GitHub Release 并上传二进制
+#   3. 更新 Homebrew tap
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build macOS binaries
+    runs-on: macos-14  # Apple Silicon (arm64)
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            TARGET_ARCH="x86_64"
+          else
+            TARGET_ARCH="arm64"
+          fi
+
+          python -m PyInstaller \
+            --onefile \
+            --name "adoback-macos-${TARGET_ARCH}" \
+            --strip \
+            --noupx \
+            --target-architecture "$TARGET_ARCH" \
+            --console \
+            --clean \
+            --log-level WARN \
+            adoback.py
+
+      - name: Verify binary
+        run: |
+          BINARY="dist/adoback-macos-${{ matrix.arch }}"
+          file "$BINARY"
+          ls -lh "$BINARY"
+          # arm64 runner 只能直接测试 arm64 二进制
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            "$BINARY" --version
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: adoback-macos-${{ matrix.arch }}
+          path: dist/adoback-macos-${{ matrix.arch }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release/
+          cp artifacts/adoback-macos-arm64/adoback-macos-arm64 release/
+          cp artifacts/adoback-macos-x86_64/adoback-macos-x86_64 release/
+          chmod +x release/*
+          ls -lh release/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          # 提取当前版本的 changelog 内容
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES=$(awk "/^## v${VERSION}/,/^---/{if(/^---/) exit; print}" CHANGELOG.md | tail -n +2)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release v${VERSION}"
+          fi
+          # 写入文件避免转义问题
+          echo "$NOTES" > release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.version }}"
+          body_path: release_notes.md
+          files: |
+            release/adoback-macos-arm64
+            release/adoback-macos-x86_64
+          draft: false
+          prerelease: false
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for release assets
+        run: sleep 10
+
+      - name: Calculate SHA256
+        id: sha
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE_URL="https://github.com/SOULRAi/adoback/releases/download/v${VERSION}"
+
+          curl -fsSL "${BASE_URL}/adoback-macos-arm64" -o /tmp/arm64
+          curl -fsSL "${BASE_URL}/adoback-macos-x86_64" -o /tmp/x86_64
+
+          echo "arm64=$(sha256sum /tmp/arm64 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "x86_64=$(sha256sum /tmp/x86_64 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew tap
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: SOULRAi/homebrew-tap
+          event-type: update-formula
+          client-payload: |
+            {
+              "version": "${{ steps.version.outputs.version }}",
+              "sha256_arm64": "${{ steps.sha.outputs.arm64 }}",
+              "sha256_x86_64": "${{ steps.sha.outputs.x86_64 }}"
+            }

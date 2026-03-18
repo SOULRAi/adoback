@@ -52,9 +52,9 @@
 
 ## 📋 计划中
 
-### v0.8.0 — 分发渠道扩展
-- [ ] Homebrew Formula（`brew tap SOULRAi/tap && brew install adoback`）
-- [ ] GitHub Actions 自动构建 + Release（push tag 自动触发）
+### ~~v0.8.0~~ v0.5.8 — 分发渠道扩展
+- [x] Homebrew Formula（`brew tap SOULRAi/tap && brew install adoback`）
+- [x] GitHub Actions 自动构建 + Release（push tag 自动触发）
 
 ### v1.0.0 — 稳定版
 - [ ] 全面测试覆盖
@@ -83,5 +83,5 @@
 | v0.5.2 | 桌面通知 + ignore 规则 | ✅ 已发布 |
 | v0.5.4 | status 面板 + watch 监听 | ✅ 已发布 |
 | v0.5.6 | CLI 面板化视觉升级 | ✅ 已发布 |
-| v0.8.0 | Homebrew + CI/CD | 📋 计划中 |
+| v0.5.8 | Homebrew + CI/CD | ✅ 已发布 |
 | v1.0.0 | 稳定版发布 | 📋 计划中 |

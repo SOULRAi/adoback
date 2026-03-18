@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.5.8 (2026-03-18)
+
+### 新增
+
+- **GitHub Actions CI/CD** — push tag 自动构建 + 发布
+  - 自动构建 macOS arm64 和 x86_64 两个预编译二进制
+  - 自动创建 GitHub Release 并上传二进制资产
+  - 自动从 CHANGELOG.md 提取版本说明作为 Release Notes
+  - 触发方式: `git tag v0.5.8 && git push origin v0.5.8`
+- **Homebrew Formula** — 支持 `brew install` 安装
+  - `brew tap SOULRAi/tap && brew install adoback`
+  - 自动识别 arm64 / x86_64 架构下载对应二进制
+  - CI 构建后自动触发 Homebrew tap 更新
+  - 含 tap 仓库一键初始化脚本 (`homebrew/setup-tap.sh`)
+
+### 变更
+
+- 新增 `.github/workflows/release.yml` 自动化发布流水线
+- 新增 `homebrew/adoback.rb` Homebrew Formula 模板
+- 新增 `homebrew/setup-tap.sh` tap 仓库初始化脚本
+- 版本号升级到 0.5.8
+
+---
+
 ## v0.5.6 (2026-03-18)
 
 ### 新增
