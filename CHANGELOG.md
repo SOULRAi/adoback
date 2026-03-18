@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.2 (2026-03-17)
+
+### 新增
+
+- **macOS 桌面通知** — 备份完成/失败/磁盘空间不足时弹出系统通知
+  - 通过 `osascript` 调用原生通知中心，零依赖
+  - 可在配置文件中精细控制：单独开关成功/失败/磁盘不足通知
+  - 守护模式异常也会通知
+  - `[notification]` 配置段：`enabled` / `on_success` / `on_failure` / `on_disk_low` / `disk_low_threshold_gb`
+- **忽略规则** — 自动排除 Adobe 缓存和临时文件，大幅减少备份体积
+  - 内置 25+ 条默认忽略模式（Media Cache、Peak Files、Auto-Save 目录等）
+  - 支持 `.adobackignore` 自定义忽略文件（语法类似 .gitignore）
+  - 可在源目录下或 `~/.local/adoback/` 全局放置
+  - 支持通配符（`*.tmp`）、前缀（`~*`）、目录模式（`dirname/`）
+
+### 变更
+
+- 默认排除目录新增 `Media Cache Files`、`Media Cache`、`Peak Files`、`Adobe Premiere Pro Preview Files`
+- `scan_files()` 整合忽略规则，扫描时自动过滤
+- `doctor` 自检新增通知和忽略规则检查
+- `guide` 引导新增通知和忽略规则说明
+- 版本号升级到 0.6.0
+
+---
+
 ## v0.5.0 (2026-03-17)
 
 ### 新增

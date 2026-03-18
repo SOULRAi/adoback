@@ -32,7 +32,9 @@
 | 👻 | **后台守护** | launchd 开机自启，登录即守护 |
 | 📁 | **多源目录** | PS、PR、AE 项目分开管理 |
 | 🔒 | **原子写入** | 临时文件 + fsync + rename，不怕断电 |
-| 🔔 | **自动更新** | `update` 一键升级到最新版 |
+| 🔔 | **桌面通知** | 备份完成/失败/磁盘不足 macOS 原生通知 |
+| 📝 | **忽略规则** | 自动排除 Adobe 缓存，支持 `.adobackignore` |
+| 🆙 | **自动更新** | `update` 一键升级到最新版 |
 | 🚀 | **零依赖** | 单文件二进制，任何 Mac 直接用 |
 
 ## 🎯 支持的 Adobe 文件
@@ -141,6 +143,35 @@ root = "/Volumes/BackupDisk/AdobeBackup"
 | `retention.keep_last` | `10` | 保留最近 N 个快照 |
 | `retention.keep_days` | `30` | 保留最近 N 天的快照 |
 | `schedule.default_interval_seconds` | `300` | 守护模式轮询间隔 (秒) |
+| `notification.enabled` | `true` | 是否开启桌面通知 |
+| `notification.on_success` | `true` | 备份成功时通知 |
+| `notification.on_failure` | `true` | 备份失败时通知 |
+| `notification.on_disk_low` | `true` | 磁盘空间不足时通知 |
+| `notification.disk_low_threshold_gb` | `5` | 磁盘不足阈值 (GB) |
+
+</details>
+
+<details>
+<summary>📝 忽略规则 (.adobackignore)</summary>
+
+在源目录下创建 `.adobackignore` 文件，语法类似 `.gitignore`：
+
+```
+# 排除临时文件
+*.tmp
+*.bak
+
+# 排除目录（末尾加 /）
+Media Cache Files/
+Adobe Premiere Pro Auto-Save/
+
+# 排除特定文件
+.DS_Store
+```
+
+默认已内置 25+ 条忽略模式，自动排除 Adobe 缓存、Media Cache、Peak Files 等。
+
+也可在 `~/.local/adoback/.adobackignore` 放全局忽略规则。
 
 </details>
 

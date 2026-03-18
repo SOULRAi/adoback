@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Adoback — macOS 本地 Adobe 项目文件备份守护工具
-v0.5.0
+v0.5.2
 
 仅面向 macOS，中文优先 CLI。
 可通过 PyInstaller 打包为零依赖单文件二进制，任何 Mac 直接使用。
@@ -35,7 +35,7 @@ from pathlib import Path
 # 常量
 # ─────────────────────────────────────────────
 
-VERSION = "0.5.0"
+VERSION = "0.5.2"
 APP_NAME = "adoback"
 SERVICE_LABEL = "com.local.adoback"
 GITHUB_REPO = "SOULRAi/adoback"
@@ -69,7 +69,41 @@ DEFAULT_EXCLUDE_DIRS = {
     "Adobe Premiere Pro Auto-Save",
     "Adobe After Effects Auto-Save",
     "Adobe InDesign Recovered",
+    "Media Cache Files",
+    "Media Cache",
+    "Peak Files",
+    "Adobe Premiere Pro Preview Files",
 }
+
+# 默认忽略模式 (.adobackignore 格式)
+DEFAULT_IGNORE_PATTERNS = [
+    # Adobe 缓存与临时文件
+    "*.tmp",
+    "*.bak",
+    "*.lck",
+    "*.lock",
+    "*.idlk",
+    "*.swp",
+    "~*",
+    "._*",
+    ".DS_Store",
+    # Premiere / After Effects 缓存
+    "Media Cache Files/",
+    "Media Cache/",
+    "Peak Files/",
+    "Adobe Premiere Pro Auto-Save/",
+    "Adobe After Effects Auto-Save/",
+    "Adobe Premiere Pro Preview Files/",
+    # InDesign 恢复文件
+    "Adobe InDesign Recovered/",
+    # 系统/版本管理
+    ".git/",
+    ".svn/",
+    "node_modules/",
+    "__pycache__/",
+]
+
+IGNOREFILE_NAME = ".adobackignore"
 
 # 退出码
 EXIT_OK = 0
@@ -260,6 +294,13 @@ DEFAULT_CONFIG = {
     "schedule": {
         "default_interval_seconds": 300,
     },
+    "notification": {
+        "enabled": True,
+        "on_success": True,
+        "on_failure": True,
+        "on_disk_low": True,
+        "disk_low_threshold_gb": 5,
+    },
     "service": {
         "label": SERVICE_LABEL,
     },
@@ -422,6 +463,26 @@ class Config:
     @property
     def exclude_dirs(self) -> set:
         return set(self.get("filters", "exclude_dirs", default=[]))
+
+    @property
+    def notify_enabled(self) -> bool:
+        return bool(self.get("notification", "enabled", default=True))
+
+    @property
+    def notify_on_success(self) -> bool:
+        return bool(self.get("notification", "on_success", default=True))
+
+    @property
+    def notify_on_failure(self) -> bool:
+        return bool(self.get("notification", "on_failure", default=True))
+
+    @property
+    def notify_on_disk_low(self) -> bool:
+        return bool(self.get("notification", "on_disk_low", default=True))
+
+    @property
+    def disk_low_threshold_gb(self) -> float:
+        return float(self.get("notification", "disk_low_threshold_gb", default=5))
 
     @property
     def service_label(self) -> str:
@@ -622,6 +683,139 @@ def printbox(title: str, width: int = 48, style: str = "double"):
 
 def printbar(char: str = "─", width: int = 44):
     printout(f"  {_c(_DIM, char * width)}")
+
+
+# ─────────────────────────────────────────────
+# macOS 桌面通知
+# ─────────────────────────────────────────────
+
+def _notify(title: str, message: str, sound: str = "default"):
+    """发送 macOS 原生桌面通知 (通过 osascript)。"""
+    if platform.system() != "Darwin":
+        return
+    # 转义双引号
+    safe_title = title.replace('"', '\\"')
+    safe_msg = message.replace('"', '\\"')
+    script = f'display notification "{safe_msg}" with title "{safe_title}" sound name "{sound}"'
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass  # 通知是尽力而为，不应影响主流程
+
+
+def notify_backup_success(cfg, result):
+    """备份成功通知。"""
+    if not cfg.notify_enabled or not cfg.notify_on_success:
+        return
+    mb = result.bytes_copied / (1024 * 1024)
+    _notify(
+        "Adoback 备份完成 ✔",
+        f"已备份 {result.copied} 个文件 ({mb:.1f} MB)",
+    )
+
+
+def notify_backup_failure(cfg, result):
+    """备份失败通知。"""
+    if not cfg.notify_enabled or not cfg.notify_on_failure:
+        return
+    _notify(
+        "Adoback 备份异常 ⚠",
+        f"{result.failed} 个文件失败，{result.copied} 个成功",
+        sound="Basso",
+    )
+
+
+def notify_disk_low(cfg, dest_path: Path):
+    """磁盘空间不足通知。"""
+    if not cfg.notify_enabled or not cfg.notify_on_disk_low:
+        return
+    try:
+        st = os.statvfs(dest_path)
+        free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+        if free_gb < cfg.disk_low_threshold_gb:
+            _notify(
+                "Adoback 磁盘空间不足 ⚠",
+                f"备份盘剩余 {free_gb:.1f} GB，低于阈值 {cfg.disk_low_threshold_gb} GB",
+                sound="Basso",
+            )
+            return True
+    except OSError:
+        pass
+    return False
+
+
+# ─────────────────────────────────────────────
+# 忽略规则 (.adobackignore)
+# ─────────────────────────────────────────────
+
+def _load_ignore_patterns(roots: list[Path]) -> list[str]:
+    """加载忽略模式：默认模式 + 各源目录下的 .adobackignore。"""
+    patterns = list(DEFAULT_IGNORE_PATTERNS)
+
+    # 在每个源目录下查找 .adobackignore
+    for root in roots:
+        ignore_file = root / IGNOREFILE_NAME
+        if ignore_file.is_file():
+            try:
+                for line in ignore_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        if line not in patterns:
+                            patterns.append(line)
+            except OSError:
+                pass
+
+    # 也检查全局配置目录
+    global_ignore = DEFAULT_INSTALL_DIR / IGNOREFILE_NAME
+    if global_ignore.is_file():
+        try:
+            for line in global_ignore.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    if line not in patterns:
+                        patterns.append(line)
+        except OSError:
+            pass
+
+    return patterns
+
+
+def _match_ignore(name: str, rel_path: str, ignore_patterns: list[str]) -> bool:
+    """判断文件是否应被忽略。
+
+    支持的模式:
+    - *.ext        按扩展名匹配文件名
+    - ~*           前缀匹配文件名
+    - dirname/     目录名匹配 (匹配路径中包含该目录)
+    - filename     精确匹配文件名
+    """
+    for pat in ignore_patterns:
+        if not pat:
+            continue
+        # 目录模式：pattern 以 / 结尾
+        if pat.endswith("/"):
+            dir_name = pat.rstrip("/")
+            if f"/{dir_name}/" in f"/{rel_path}" or rel_path.startswith(dir_name + "/"):
+                return True
+            continue
+        # 通配符模式
+        if pat.startswith("*"):
+            if name.endswith(pat[1:]):
+                return True
+        elif pat.endswith("*"):
+            if name.startswith(pat[:-1]):
+                return True
+        elif pat.startswith("."):
+            # 隐藏文件/扩展名匹配
+            if name == pat or name.endswith(pat):
+                return True
+        else:
+            if name == pat:
+                return True
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -875,6 +1069,7 @@ def scan_files(cfg: Config) -> list[FileItem]:
     include = cfg.include_exts
     exclude = cfg.exclude_patterns
     exclude_dirs = cfg.exclude_dirs
+    ignore_patterns = _load_ignore_patterns(roots)
     items = []
 
     for root in roots:
@@ -883,7 +1078,12 @@ def scan_files(cfg: Config) -> list[FileItem]:
             continue
 
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+            # 过滤目录：排除配置中的 exclude_dirs + ignore 中的目录模式
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in exclude_dirs
+                and not _match_ignore(d, d + "/", ignore_patterns)
+            ]
 
             for fname in filenames:
                 _, ext = os.path.splitext(fname)
@@ -893,14 +1093,19 @@ def scan_files(cfg: Config) -> list[FileItem]:
                     continue
 
                 full = Path(dirpath) / fname
-                try:
-                    st = full.stat()
-                except (OSError, PermissionError):
-                    continue
                 # 多根目录时用 "根目录名/相对路径" 作为 rel
                 rel = str(full.relative_to(root))
                 if len(roots) > 1:
                     rel = f"{root.name}/{rel}"
+
+                # 检查 ignore 规则
+                if _match_ignore(fname, rel, ignore_patterns):
+                    continue
+
+                try:
+                    st = full.stat()
+                except (OSError, PermissionError):
+                    continue
                 items.append(FileItem(full, rel, st.st_size, st.st_mtime_ns))
 
     return items
@@ -1420,14 +1625,26 @@ def run_daemon(cfg: Config):
 
     while _daemon_running:
         try:
+            # 每轮检查磁盘空间
+            if cfg.dest_root.is_dir():
+                notify_disk_low(cfg, cfg.dest_root)
+
             result = run_backup(cfg, "incremental", logger=logger)
             if result.copied > 0 or result.failed > 0:
                 print_summary(result)
+                # 守护模式通知
+                if result.failed > 0:
+                    notify_backup_failure(cfg, result)
+                elif result.copied > 0:
+                    notify_backup_success(cfg, result)
                 if result.failures:
                     export_report(cfg, result)
         except Exception as e:
             logger.error("daemon_error", error=str(e))
             printerr(f"备份执行异常: {e}")
+            # 守护模式异常通知
+            if cfg.notify_enabled:
+                _notify("Adoback 运行异常 ⚠", str(e), sound="Basso")
 
         # 等待下一轮，支持提前中断
         for _ in range(interval):
@@ -1545,7 +1762,31 @@ def run_doctor(cfg: Config):
     else:
         printinfo("无锁冲突")
 
-    # 6. 服务
+    # 6. 通知与忽略规则
+    printstep("◆", "通知与忽略规则")
+    if cfg.notify_enabled:
+        printinfo("桌面通知: 已开启")
+        details = []
+        if cfg.notify_on_success:
+            details.append("成功")
+        if cfg.notify_on_failure:
+            details.append("失败")
+        if cfg.notify_on_disk_low:
+            details.append(f"磁盘<{cfg.disk_low_threshold_gb}GB")
+        printdim(f"    触发条件: {' / '.join(details)}")
+    else:
+        printdim("桌面通知: 已关闭")
+
+    ignore_pats = _load_ignore_patterns(roots)
+    ignore_count = len(ignore_pats)
+    printinfo(f"忽略规则: {ignore_count} 条模式")
+    # 检查是否存在 .adobackignore 文件
+    for root in roots:
+        igf = root / IGNOREFILE_NAME
+        if igf.is_file():
+            printdim(f"    自定义忽略: {igf}")
+
+    # 7. 服务
     printstep("◆", "服务状态")
     plist = _get_plist_path(cfg)
     if plist.exists():
@@ -1642,6 +1883,18 @@ level = "info"
 [schedule]
 # 守护模式轮询间隔 (秒)
 default_interval_seconds = 300
+
+[notification]
+# macOS 桌面通知
+enabled = true
+# 备份成功时通知
+on_success = true
+# 备份失败时通知
+on_failure = true
+# 磁盘空间不足时通知
+on_disk_low = true
+# 磁盘空间不足阈值 (GB)
+disk_low_threshold_gb = 5
 
 [service]
 label = "com.local.adoback"
@@ -1794,6 +2047,24 @@ GUIDE_TEXT = """\
     {prog} config show          看当前配置
     {prog} service status       看看服务跑没跑
     {prog} service off          不想用了？关掉服务
+
+  ─────────────────────────────────────────
+
+  🔔 桌面通知:
+
+  备份完成、失败、磁盘空间不足时都会弹通知。
+  不想被打扰？在 config.toml 里关掉:
+    [notification]
+    enabled = false
+
+  📝 忽略规则:
+
+  默认就帮你排除了 Adobe 缓存、Media Cache 等垃圾文件。
+  想自定义？在源目录下放一个 .adobackignore 文件:
+    # 排除这些文件
+    *.tmp
+    Media Cache Files/
+  语法跟 .gitignore 差不多，很好理解。
 
   ─────────────────────────────────────────
 
@@ -3106,9 +3377,18 @@ def main():
 
             try:
                 with InstanceLock(cfg.lock_path):
+                    # 备份前检查磁盘空间
+                    if cfg.dest_root.is_dir():
+                        notify_disk_low(cfg, cfg.dest_root)
+
                     result = run_backup(cfg, mode, dry_run=args.dry_run, logger=logger)
                     if not args.dry_run:
                         print_summary(result)
+                        # 发送通知
+                        if result.failed > 0:
+                            notify_backup_failure(cfg, result)
+                        elif result.copied > 0:
+                            notify_backup_success(cfg, result)
                         if result.failures:
                             fmt = "json" if getattr(args, "json_report", False) else "text"
                             export_report(cfg, result, fmt=fmt)

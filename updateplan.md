@@ -23,21 +23,21 @@
 - [x] `restore` 交互式恢复（搜索、分页、多版本选择、恢复前自动 .bak）
 - [x] `clean` 按策略清理过期快照（keep_last / keep_days / max_size / --dry-run / --force）
 
+### v0.5.2 — 通知 + 忽略规则
+- [x] macOS 桌面通知（osascript 原生通知中心）
+  - 备份完成/失败/异常通知
+  - 磁盘空间不足警告（可配阈值）
+  - 守护模式运行时异常通知
+  - `[notification]` 配置段，可精细开关
+- [x] 忽略规则 .adobackignore
+  - 类似 .gitignore 语法（通配符、目录模式）
+  - 内置 25+ 条默认忽略（Media Cache、Peak Files 等）
+  - 支持源目录 + 全局 .adobackignore
+  - scan_files 自动过滤，减少备份体积
+
 ---
 
 ## 📋 计划中
-
-### v0.6.0 — 通知 + 忽略规则
-- [ ] macOS 桌面通知（osascript / terminal-notifier）
-  - 备份完成通知
-  - 备份失败告警
-  - 磁盘空间不足警告
-  - 配置项：可关闭通知
-- [ ] 忽略规则 backup.ignore
-  - 类似 .gitignore 语法
-  - 默认排除 Adobe 缓存、Media Cache、临时文件
-  - 配置文件中 `backup.ignore_patterns = [...]`
-  - 显著减少备份体积和耗时
 
 ### v0.7.0 — TUI 仪表盘 + FSEvents 监听
 - [ ] `adoback status` TUI 实时仪表盘
@@ -76,7 +76,7 @@
 | v0.3.0 | CLI 简化 + 一键安装 + npm 分发 | ✅ 已发布 |
 | v0.4.0 | 多源目录 + CLI 美化 + 自动更新 | ✅ 已发布 |
 | v0.5.0 | restore 恢复 + clean 清理 | ✅ 已发布 |
-| v0.6.0 | 桌面通知 + ignore 规则 | 📋 计划中 |
+| v0.5.2 | 桌面通知 + ignore 规则 | ✅ 已发布 |
 | v0.7.0 | TUI 仪表盘 + fsevents 监听 | 📋 计划中 |
 | v0.8.0 | Homebrew + CI/CD | 📋 计划中 |
 | v1.0.0 | 稳定版发布 | 📋 计划中 |
