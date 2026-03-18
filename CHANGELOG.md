@@ -17,6 +17,17 @@
   - 文件保存后秒级触发增量备份（延迟从分钟级降到 ~2 秒）
   - 内置防抖机制，避免频繁触发
   - 自动回退：非 macOS 环境自动降级为定时轮询
+- **`completion` Tab 补全** — 支持 zsh / bash
+  - 补全所有子命令、子操作、参数选项
+  - `adoback completion` 安装，`adoback completion uninstall` 卸载
+  - `setup` 时自动安装
+
+### 修复
+
+- **`uninstall` 卸载不彻底** — 现在会完整清理：
+  - `~/.local/bin/adoback` 符号链接
+  - shell rc 中的 PATH 和补全配置
+  - 补全脚本文件
 
 ### 变更
 
