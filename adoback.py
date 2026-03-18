@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Adoback — macOS 本地 Adobe 项目文件备份守护工具
-v0.5.2
+v0.5.4
 
 仅面向 macOS，中文优先 CLI。
 可通过 PyInstaller 打包为零依赖单文件二进制，任何 Mac 直接使用。
@@ -35,7 +35,7 @@ from pathlib import Path
 # 常量
 # ─────────────────────────────────────────────
 
-VERSION = "0.5.2"
+VERSION = "0.5.4"
 APP_NAME = "adoback"
 SERVICE_LABEL = "com.local.adoback"
 GITHUB_REPO = "SOULRAi/adoback"
@@ -2317,7 +2317,7 @@ def cmd_uninstall(args, cfg):
     # 询问是否删除数据
     if not getattr(args, "yes", False):
         printout("")
-        printout("是否同时删除所有备份数据和状态? (y/N) ", )
+        printout(f"  {_c(_CYAN, '?')} 是否同时删除所有备份数据和状态? (y/N) ", )
         try:
             ans = input().strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -2326,23 +2326,78 @@ def cmd_uninstall(args, cfg):
         ans = "y"
 
     printstep(2, "清理文件")
-    # 删除安装目录
+
+    # 删除符号链接
+    link_path = HOME / ".local" / "bin" / "adoback"
+    if link_path.is_symlink() or link_path.exists():
+        try:
+            link_path.unlink()
+            printinfo(f"已删除符号链接: {link_path}")
+        except OSError as e:
+            printwarn(f"无法删除符号链接: {e}")
+
+    # 删除安装目录 (~/.local/adoback/)
     install_dir = DEFAULT_INSTALL_DIR
     if install_dir.is_dir():
         shutil.rmtree(install_dir)
-        printout(f"    ✓ 已删除: {install_dir}")
+        printinfo(f"已删除安装目录: {install_dir}")
 
+    # 删除数据
     if ans == "y":
         state_dir = cfg.state_dir
         if state_dir.is_dir():
             shutil.rmtree(state_dir)
-            printout(f"    ✓ 已删除: {state_dir}")
+            printinfo(f"已删除状态目录: {state_dir}")
         log_dir = cfg.log_dir
         if log_dir.is_dir():
             shutil.rmtree(log_dir)
-            printout(f"    ✓ 已删除: {log_dir}")
+            printinfo(f"已删除日志目录: {log_dir}")
 
-    printinfo("卸载完成")
+    # 清理 shell 补全脚本
+    printstep(3, "清理 shell 配置")
+    _uninstall_completion()
+
+    # 清理 shell rc 中的 PATH 和 Adoback 相关行
+    shell_rc = "~/.zshrc" if "zsh" in os.environ.get("SHELL", "") else "~/.bash_profile"
+    shell_rc_path = Path(shell_rc).expanduser()
+    if shell_rc_path.exists():
+        try:
+            content = shell_rc_path.read_text(encoding="utf-8")
+            lines = content.split("\n")
+            new_lines = []
+            skip_next = False
+            cleaned = False
+            for line in lines:
+                if skip_next:
+                    skip_next = False
+                    cleaned = True
+                    continue
+                if line.strip() == "# Adoback":
+                    skip_next = True  # 跳过 # Adoback 和下一行 (export PATH=...)
+                    cleaned = True
+                    continue
+                # 也清理独立的 adoback 补全 source 行
+                if "adoback" in line and ("compdef" in line or "complete " in line or "source" in line and "completion" in line):
+                    cleaned = True
+                    continue
+                new_lines.append(line)
+            if cleaned:
+                shell_rc_path.write_text("\n".join(new_lines), encoding="utf-8")
+                printinfo(f"已清理 {shell_rc} 中的 Adoback 配置")
+            else:
+                printdim(f"    {shell_rc} 中无需清理")
+        except OSError as e:
+            printwarn(f"清理 {shell_rc} 失败: {e}")
+    else:
+        printdim(f"    {shell_rc} 不存在")
+
+    printout("")
+    printbar("═")
+    printout(f"  {_c(_GREEN, _ICON_SPARK)} {_c(_BOLD, _c(_GREEN, '卸载完成!'))}")
+    printbar("═")
+    printout("")
+    printdim("    重新打开终端以确保所有更改生效")
+    printout("")
 
 
 # ─────────────────────────────────────────────
@@ -3124,8 +3179,15 @@ def cmd_setup(args, cfg):
             printinfo(f"已添加 PATH 到 {shell_rc}")
             printwarn(f"请运行 source {shell_rc} 或重新打开终端")
 
-    # 5. 自检
-    printstep(5, "自检")
+    # 5. Tab 补全
+    printstep(5, "Tab 补全")
+    try:
+        _install_completion()
+    except Exception as e:
+        printwarn(f"补全安装失败: {e}")
+
+    # 6. 自检
+    printstep(6, "自检")
     try:
         cfg = Config.load(config_path)
         run_doctor(cfg)
@@ -3143,6 +3205,763 @@ def cmd_setup(args, cfg):
     printout(f"    {_c(_CYAN, _prog() + ' backup --full')}      跑一次全量备份")
     printout(f"    {_c(_CYAN, _prog() + ' service on')}         设成开机自动备份，装完就不用管了")
     printout("")
+
+
+# ─────────────────────────────────────────────
+# Tab 补全
+# ─────────────────────────────────────────────
+
+_ZSH_COMPLETION = """\
+#compdef adoback
+
+_adoback() {
+    local -a commands
+    commands=(
+        'setup:一键初始化 (安装 + 配置 + 引导)'
+        'backup:备份 (默认增量)'
+        'daemon:守护模式 (前台循环增量备份)'
+        'watch:实时监听模式 (文件变化即备份)'
+        'status:状态面板 (一览备份全局)'
+        'doctor:系统自检'
+        'guide:新手引导'
+        'config:配置管理'
+        'service:服务管理'
+        'last-run:查看最近运行记录'
+        'report:查看报告'
+        'restore:从备份中恢复文件'
+        'clean:清理过期备份'
+        'update:检查并更新到最新版本'
+        'install:安装到本地'
+        'uninstall:卸载'
+    )
+
+    local -a config_actions
+    config_actions=(
+        'init:生成配置模板'
+        'show:显示当前配置'
+        'validate:验证配置'
+        'paths:显示关键路径'
+    )
+
+    local -a service_actions
+    service_actions=(
+        'on:安装并启动服务'
+        'off:停止并卸载服务'
+        'status:查看服务状态'
+        'restart:重启服务'
+    )
+
+    _arguments -C \\
+        '--version[显示版本号]' \\
+        '--help[显示帮助]' \\
+        '(-c --config)'{-c,--config}'[配置文件路径]:file:_files' \\
+        '1:command:->cmd' \\
+        '*::arg:->args'
+
+    case $state in
+    cmd)
+        _describe 'command' commands
+        ;;
+    args)
+        case $words[1] in
+        backup)
+            _arguments \\
+                '--full[全量备份]' \\
+                '--dry-run[预演模式]' \\
+                '--json-report[导出 JSON 报告]'
+            ;;
+        config)
+            _describe 'action' config_actions
+            ;;
+        service)
+            _describe 'action' service_actions
+            ;;
+        status)
+            _arguments \\
+                '(-w --watch)'{-w,--watch}'[实时刷新模式]' \\
+                '--interval[刷新间隔 (秒)]:seconds:'
+            ;;
+        clean)
+            _arguments \\
+                '--dry-run[预览不删除]' \\
+                '(-f --force)'{-f,--force}'[跳过确认]' \\
+                '--keep-last[保留最新 N 个]:count:' \\
+                '--keep-days[保留最近 N 天]:days:' \\
+                '--max-size[容量上限 (GB)]:size:'
+            ;;
+        restore)
+            _arguments \\
+                '(-s --search)'{-s,--search}'[搜索关键词]:keyword:' \\
+                '(-l --list)'{-l,--list}'[仅列出文件]'
+            ;;
+        last-run)
+            _arguments \\
+                '(-n --count)'{-n,--count}'[显示最近 N 次]:count:'
+            ;;
+        guide)
+            _arguments \\
+                '(-i --interactive)'{-i,--interactive}'[交互式引导]'
+            ;;
+        update)
+            _arguments \\
+                '--check[仅检查不更新]'
+            ;;
+        uninstall)
+            _arguments \\
+                '(-y --yes)'{-y,--yes}'[跳过确认]'
+            ;;
+        esac
+        ;;
+    esac
+}
+
+_adoback "$@"
+"""
+
+_BASH_COMPLETION = """\
+_adoback() {
+    local cur prev commands
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    commands="setup backup daemon watch status doctor guide config service last-run report restore clean update install uninstall"
+
+    case "$prev" in
+        adoback|adoback.py)
+            COMPREPLY=( $(compgen -W "$commands --version --help --config" -- "$cur") )
+            return 0
+            ;;
+        config)
+            COMPREPLY=( $(compgen -W "init show validate paths" -- "$cur") )
+            return 0
+            ;;
+        service)
+            COMPREPLY=( $(compgen -W "on off status restart" -- "$cur") )
+            return 0
+            ;;
+        backup)
+            COMPREPLY=( $(compgen -W "--full --dry-run --json-report" -- "$cur") )
+            return 0
+            ;;
+        status)
+            COMPREPLY=( $(compgen -W "--watch --interval" -- "$cur") )
+            return 0
+            ;;
+        clean)
+            COMPREPLY=( $(compgen -W "--dry-run --force --keep-last --keep-days --max-size" -- "$cur") )
+            return 0
+            ;;
+        restore)
+            COMPREPLY=( $(compgen -W "--search --list" -- "$cur") )
+            return 0
+            ;;
+        update)
+            COMPREPLY=( $(compgen -W "--check" -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--version --help --config" -- "$cur") )
+    fi
+}
+complete -F _adoback adoback
+complete -F _adoback adoback.py
+"""
+
+COMPLETION_DIR = HOME / ".local" / "share" / "adoback" / "completions"
+
+
+def _install_completion():
+    """安装 shell tab 补全脚本。"""
+    COMPLETION_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 写入补全脚本文件
+    zsh_file = COMPLETION_DIR / "_adoback"
+    zsh_file.write_text(_ZSH_COMPLETION, encoding="utf-8")
+
+    bash_file = COMPLETION_DIR / "adoback.bash"
+    bash_file.write_text(_BASH_COMPLETION, encoding="utf-8")
+
+    shell = os.environ.get("SHELL", "")
+
+    if "zsh" in shell:
+        # zsh: 添加 fpath 和 compinit
+        zshrc = HOME / ".zshrc"
+        fpath_line = f'fpath=({COMPLETION_DIR} $fpath)'
+        source_line = 'autoload -Uz compinit && compinit -C'
+        marker = "# Adoback completions"
+
+        if zshrc.exists():
+            content = zshrc.read_text(encoding="utf-8")
+        else:
+            content = ""
+
+        if marker not in content:
+            with open(zshrc, "a", encoding="utf-8") as f:
+                f.write(f"\n{marker}\n{fpath_line}\n{source_line}\n")
+            printinfo("已安装 zsh 补全")
+            printdim(f"    补全脚本: {zsh_file}")
+            printdim(f"    重新打开终端或运行 source ~/.zshrc 生效")
+        else:
+            printinfo("zsh 补全已安装")
+    else:
+        # bash
+        bashrc = HOME / ".bash_profile"
+        source_line = f'source "{bash_file}"'
+        marker = "# Adoback completions"
+
+        if bashrc.exists():
+            content = bashrc.read_text(encoding="utf-8")
+        else:
+            content = ""
+
+        if marker not in content:
+            with open(bashrc, "a", encoding="utf-8") as f:
+                f.write(f"\n{marker}\n{source_line}\n")
+            printinfo("已安装 bash 补全")
+            printdim(f"    补全脚本: {bash_file}")
+            printdim(f"    重新打开终端或运行 source ~/.bash_profile 生效")
+        else:
+            printinfo("bash 补全已安装")
+
+
+def _uninstall_completion():
+    """卸载 shell tab 补全脚本。"""
+    # 删除补全脚本文件
+    if COMPLETION_DIR.is_dir():
+        shutil.rmtree(COMPLETION_DIR)
+        printinfo(f"已删除补全脚本: {COMPLETION_DIR}")
+
+    # 从 shell rc 中移除补全相关行
+    for rc_name in [HOME / ".zshrc", HOME / ".bash_profile"]:
+        if not rc_name.exists():
+            continue
+        try:
+            content = rc_name.read_text(encoding="utf-8")
+            if "# Adoback completions" not in content:
+                continue
+            lines = content.split("\n")
+            new_lines = []
+            skip = False
+            for line in lines:
+                if line.strip() == "# Adoback completions":
+                    skip = True
+                    continue
+                if skip:
+                    # 跳过 marker 后面的补全相关行（最多 2 行）
+                    if "adoback" in line or "compinit" in line:
+                        continue
+                    skip = False
+                new_lines.append(line)
+            rc_name.write_text("\n".join(new_lines), encoding="utf-8")
+            printinfo(f"已清理 {rc_name.name} 中的补全配置")
+        except OSError:
+            pass
+
+
+# ─────────────────────────────────────────────
+# TUI 状态仪表盘
+# ─────────────────────────────────────────────
+
+def _disk_usage(path: Path) -> tuple[float, float, float]:
+    """返回 (total_gb, used_gb, free_gb)。"""
+    try:
+        st = os.statvfs(path)
+        total = (st.f_blocks * st.f_frsize) / (1024 ** 3)
+        free = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+        used = total - free
+        return total, used, free
+    except OSError:
+        return 0, 0, 0
+
+
+def _backup_dir_size(dest: Path) -> tuple[int, int, float]:
+    """返回 (快照数, 文件数, 总大小MB)。"""
+    if not dest.is_dir():
+        return 0, 0, 0.0
+    snaps = [d for d in dest.iterdir() if d.is_dir()]
+    total_files = 0
+    total_size = 0
+    for snap in snaps:
+        for fp in snap.rglob("*"):
+            if fp.is_file():
+                try:
+                    total_size += fp.stat().st_size
+                    total_files += 1
+                except OSError:
+                    pass
+    return len(snaps), total_files, total_size / (1024 * 1024)
+
+
+def _progress_bar(ratio: float, width: int = 20) -> str:
+    """生成文本进度条。"""
+    filled = int(ratio * width)
+    filled = max(0, min(width, filled))
+    bar = "█" * filled + "░" * (width - filled)
+    pct = ratio * 100
+    if pct > 90:
+        color = _RED
+    elif pct > 70:
+        color = _YELLOW
+    else:
+        color = _GREEN
+    return f"{_c(color, bar)} {pct:.0f}%"
+
+
+def _read_recent_logs(log_path: Path, n: int = 5) -> list[dict]:
+    """读取最近 N 条 JSONL 日志。"""
+    if not log_path.is_file():
+        return []
+    try:
+        lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+        entries = []
+        for line in reversed(lines):
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+            if len(entries) >= n:
+                break
+        return entries
+    except OSError:
+        return []
+
+
+def cmd_status(args, cfg):
+    """TUI 状态仪表盘 — 一览全局。"""
+    # ANSI 清屏 (仅交互模式)
+    is_watch = getattr(args, "watch", False)
+
+    def _render():
+        lines = []
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ── 标题 ──
+        lines.append("")
+        title = f" ✦ Adoback v{VERSION} · 状态面板 ✦ "
+        inner_w = 50
+        tl, tr, bl, br, h, v = "╔", "╗", "╚", "╝", "═", "║"
+        vis = _visible_len(title)
+        pad_total = inner_w - vis
+        pad_l = pad_total // 2
+        pad_r = pad_total - pad_l
+        lines.append(f"  {_c(_CYAN, tl + h * inner_w + tr)}")
+        lines.append(f"  {_c(_CYAN, v)}{' ' * pad_l}{_c(_BOLD, title)}{' ' * pad_r}{_c(_CYAN, v)}")
+        lines.append(f"  {_c(_CYAN, bl + h * inner_w + br)}")
+        lines.append(f"  {_c(_DIM, now_str)}")
+
+        # ── 1. 服务状态 ──
+        lines.append("")
+        lines.append(f"  {_c(_CYAN, '◆')} {_c(_BOLD, '服务状态')}")
+        lines.append(f"  {_c(_DIM, '─' * 44)}")
+
+        plist = _get_plist_path(cfg)
+        if plist.exists():
+            # 检测是否在运行
+            result = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+            running = False
+            pid_str = "-"
+            for line in result.stdout.splitlines():
+                if cfg.service_label in line:
+                    parts = line.split()
+                    if parts[0] != "-":
+                        running = True
+                        pid_str = parts[0]
+                    break
+            if running:
+                lines.append(f"    {_c(_GREEN, _ICON_OK)} 运行中  PID {_c(_BOLD, pid_str)}")
+            else:
+                lines.append(f"    {_c(_YELLOW, _ICON_WARN)} 已安装但未运行")
+        else:
+            lines.append(f"    {_c(_DIM, _ICON_DOT)} 未安装")
+
+        lock_path = cfg.lock_path
+        if lock_path.exists():
+            try:
+                pid = int(lock_path.read_text().strip())
+                try:
+                    os.kill(pid, 0)
+                    lines.append(f"    {_c(_GREEN, _ICON_OK)} 守护进程活跃  PID {pid}")
+                except ProcessLookupError:
+                    lines.append(f"    {_c(_YELLOW, _ICON_WARN)} 残留锁文件 (PID {pid} 已退出)")
+            except (ValueError, FileNotFoundError):
+                pass
+
+        # ── 2. 源目录 ──
+        lines.append("")
+        lines.append(f"  {_c(_CYAN, '◆')} {_c(_BOLD, '监控目录')}")
+        lines.append(f"  {_c(_DIM, '─' * 44)}")
+        roots = cfg.source_roots
+        if roots:
+            for r in roots:
+                if r.is_dir():
+                    # 统计 Adobe 文件数
+                    count = 0
+                    for _, _, fnames in os.walk(r):
+                        for fn in fnames:
+                            _, ext = os.path.splitext(fn)
+                            if ext.lower() in cfg.include_exts:
+                                count += 1
+                    lines.append(f"    {_c(_GREEN, _ICON_OK)} {r.name}  {_c(_DIM, f'({count} 个文件)')}")
+                else:
+                    lines.append(f"    {_c(_RED, _ICON_ERR)} {r.name}  {_c(_RED, '不存在')}")
+        else:
+            lines.append(f"    {_c(_DIM, '未配置源目录')}")
+
+        # ── 3. 备份空间 ──
+        lines.append("")
+        lines.append(f"  {_c(_CYAN, '◆')} {_c(_BOLD, '备份空间')}")
+        lines.append(f"  {_c(_DIM, '─' * 44)}")
+        dest = cfg.dest_root
+        if dest and dest != Path() and dest.is_dir():
+            snap_count, file_count, size_mb = _backup_dir_size(dest)
+            size_gb = size_mb / 1024
+            lines.append(f"    目录       {_c(_DIM, str(dest))}")
+            lines.append(f"    快照       {_c(_BOLD, str(snap_count))} 个")
+            lines.append(f"    文件       {_c(_BOLD, str(file_count))} 个")
+            lines.append(f"    占用       {_c(_BOLD, f'{size_gb:.2f}')} GB ({size_mb:.0f} MB)")
+
+            # 磁盘使用情况
+            total_gb, used_gb, free_gb = _disk_usage(dest)
+            if total_gb > 0:
+                ratio = used_gb / total_gb
+                lines.append(f"    磁盘       {_progress_bar(ratio)}")
+                lines.append(f"               {_c(_DIM, f'可用 {free_gb:.1f} GB / 共 {total_gb:.1f} GB')}")
+                if free_gb < cfg.disk_low_threshold_gb:
+                    lines.append(f"    {_c(_RED, _ICON_WARN + ' 磁盘空间不足!')}")
+        else:
+            lines.append(f"    {_c(_DIM, '备份目录不存在或未配置')}")
+
+        # ── 4. 最近备份 ──
+        lines.append("")
+        lines.append(f"  {_c(_CYAN, '◆')} {_c(_BOLD, '最近备份')}")
+        lines.append(f"  {_c(_DIM, '─' * 44)}")
+        try:
+            db = Database(cfg.manifest_path)
+            runs = db.recent_runs(5)
+            db.close()
+            if runs:
+                for run in runs:
+                    status = run.get("status", "?")
+                    started = run.get("started_at", "")
+                    copied = run.get("copied", 0)
+                    failed = run.get("failed", 0)
+                    mb = run.get("bytes_copied", 0) / (1024 * 1024)
+
+                    if status == "success":
+                        icon = _c(_GREEN, _ICON_OK)
+                    elif status == "partial":
+                        icon = _c(_YELLOW, _ICON_WARN)
+                    elif status == "failed":
+                        icon = _c(_RED, _ICON_ERR)
+                    else:
+                        icon = _c(_DIM, _ICON_DOT)
+
+                    # 简化时间显示
+                    time_str = started[:19].replace("T", " ") if started else "?"
+                    detail = f"{copied}✔"
+                    if failed:
+                        detail += f" {failed}✘"
+                    if mb > 0:
+                        detail += f" {mb:.1f}MB"
+
+                    lines.append(f"    {icon} {_c(_DIM, time_str)}  {detail}")
+            else:
+                lines.append(f"    {_c(_DIM, '暂无备份记录')}")
+        except Exception:
+            lines.append(f"    {_c(_DIM, '无法读取数据库')}")
+
+        # ── 5. 最近日志 ──
+        lines.append("")
+        lines.append(f"  {_c(_CYAN, '◆')} {_c(_BOLD, '最近日志')}")
+        lines.append(f"  {_c(_DIM, '─' * 44)}")
+        logs = _read_recent_logs(cfg.log_path, 5)
+        if logs:
+            for entry in logs:
+                ts = entry.get("ts", "")[:19].replace("T", " ")
+                level = entry.get("level", "?")
+                event = entry.get("event", "")
+                if level == "error":
+                    icon = _c(_RED, "E")
+                elif level == "warn":
+                    icon = _c(_YELLOW, "W")
+                else:
+                    icon = _c(_DIM, "·")
+                lines.append(f"    {icon} {_c(_DIM, ts)} {event}")
+        else:
+            lines.append(f"    {_c(_DIM, '暂无日志')}")
+
+        # ── 通知状态 ──
+        lines.append("")
+        notify_parts = []
+        if cfg.notify_enabled:
+            if cfg.notify_on_success:
+                notify_parts.append("成功")
+            if cfg.notify_on_failure:
+                notify_parts.append("失败")
+            if cfg.notify_on_disk_low:
+                notify_parts.append(f"磁盘<{cfg.disk_low_threshold_gb}G")
+            lines.append(f"  {_c(_DIM, f'🔔 通知: {" / ".join(notify_parts)}')}")
+        else:
+            lines.append(f"  {_c(_DIM, '🔕 通知: 已关闭')}")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    if is_watch:
+        # 实时刷新模式
+        interval = getattr(args, "interval", 5) or 5
+        printinfo(f"实时监控模式 (每 {interval} 秒刷新，Ctrl+C 退出)")
+        try:
+            while True:
+                sys.stdout.write("\033[2J\033[H")  # 清屏+光标归位
+                sys.stdout.write(_render())
+                sys.stdout.flush()
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            printout("")
+            printinfo("已退出监控")
+    else:
+        printout(_render())
+
+
+# ─────────────────────────────────────────────
+# FSEvents 文件系统监听
+# ─────────────────────────────────────────────
+
+def _fsevents_available() -> bool:
+    """检查是否可用 macOS FSEvents (通过 PyObjC 或 ctypes)。"""
+    if platform.system() != "Darwin":
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+        cf = ctypes.util.find_library("CoreServices")
+        return cf is not None
+    except Exception:
+        return False
+
+
+class FSEventsWatcher:
+    """基于 macOS FSEvents 的目录监听器 (纯 ctypes 实现，零依赖)。
+
+    当监控目录中有文件变更时触发回调。使用防抖机制避免频繁触发。
+    """
+
+    def __init__(self, paths: list[str], callback, latency: float = 2.0):
+        self._paths = paths
+        self._callback = callback
+        self._latency = latency
+        self._stream = None
+        self._running = False
+
+    def start(self):
+        """启动监听 (阻塞当前线程)。"""
+        import ctypes
+        import ctypes.util
+
+        CF = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation"))
+        CS = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreServices"))
+
+        # 类型定义
+        CFAllocatorRef = ctypes.c_void_p
+        CFStringRef = ctypes.c_void_p
+        CFArrayRef = ctypes.c_void_p
+        CFRunLoopRef = ctypes.c_void_p
+        FSEventStreamRef = ctypes.c_void_p
+
+        kCFStringEncodingUTF8 = 0x08000100
+        kFSEventStreamCreateFlagFileEvents = 0x00000010
+        kFSEventStreamCreateFlagNoDefer = 0x00000002
+
+        # FSEventStreamCallback 签名
+        FSEventStreamCallback = ctypes.CFUNCTYPE(
+            None,
+            ctypes.c_void_p,  # streamRef
+            ctypes.c_void_p,  # clientCallBackInfo
+            ctypes.c_size_t,  # numEvents
+            ctypes.c_void_p,  # eventPaths
+            ctypes.c_void_p,  # eventFlags
+            ctypes.c_void_p,  # eventIds
+        )
+
+        # 创建 CFString
+        CF.CFStringCreateWithCString.restype = CFStringRef
+        CF.CFStringCreateWithCString.argtypes = [CFAllocatorRef, ctypes.c_char_p, ctypes.c_uint32]
+
+        # 创建 CFArray
+        CF.CFArrayCreate.restype = CFArrayRef
+        CF.CFArrayCreate.argtypes = [CFAllocatorRef, ctypes.POINTER(ctypes.c_void_p), ctypes.c_long, ctypes.c_void_p]
+
+        # CFRunLoop
+        CF.CFRunLoopGetCurrent.restype = CFRunLoopRef
+        CF.CFRunLoopRun.restype = None
+        CF.CFRunLoopStop.restype = None
+        CF.CFRunLoopStop.argtypes = [CFRunLoopRef]
+
+        kCFRunLoopDefaultMode = CFStringRef.in_dll(CF, "kCFRunLoopDefaultMode")
+
+        # FSEventStream
+        CS.FSEventStreamCreate.restype = FSEventStreamRef
+        CS.FSEventStreamCreate.argtypes = [
+            CFAllocatorRef,          # allocator
+            FSEventStreamCallback,   # callback
+            ctypes.c_void_p,         # context
+            CFArrayRef,              # pathsToWatch
+            ctypes.c_uint64,         # sinceWhen
+            ctypes.c_double,         # latency
+            ctypes.c_uint32,         # flags
+        ]
+        CS.FSEventStreamScheduleWithRunLoop.restype = None
+        CS.FSEventStreamScheduleWithRunLoop.argtypes = [FSEventStreamRef, CFRunLoopRef, CFStringRef]
+        CS.FSEventStreamStart.restype = ctypes.c_bool
+        CS.FSEventStreamStart.argtypes = [FSEventStreamRef]
+        CS.FSEventStreamStop.restype = None
+        CS.FSEventStreamStop.argtypes = [FSEventStreamRef]
+        CS.FSEventStreamInvalidate.restype = None
+        CS.FSEventStreamInvalidate.argtypes = [FSEventStreamRef]
+        CS.FSEventStreamRelease.restype = None
+        CS.FSEventStreamRelease.argtypes = [FSEventStreamRef]
+
+        # 防抖计时器
+        last_trigger = [0.0]
+        debounce_sec = self._latency
+
+        def _callback_impl(stream, info, num_events, paths, flags, ids):
+            now = time.monotonic()
+            if now - last_trigger[0] < debounce_sec:
+                return
+            last_trigger[0] = now
+            try:
+                self._callback()
+            except Exception:
+                pass
+
+        # 保持回调引用防 GC
+        self._cb_ref = FSEventStreamCallback(_callback_impl)
+
+        # 构建路径数组
+        cf_paths = []
+        for p in self._paths:
+            cf_str = CF.CFStringCreateWithCString(None, p.encode("utf-8"), kCFStringEncodingUTF8)
+            cf_paths.append(cf_str)
+
+        paths_array_type = ctypes.c_void_p * len(cf_paths)
+        paths_array = paths_array_type(*cf_paths)
+        cf_array = CF.CFArrayCreate(None, paths_array, len(cf_paths), None)
+
+        kFSEventStreamEventIdSinceNow = 0xFFFFFFFFFFFFFFFF
+        flags = kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
+
+        self._stream = CS.FSEventStreamCreate(
+            None, self._cb_ref, None, cf_array,
+            kFSEventStreamEventIdSinceNow, self._latency, flags,
+        )
+
+        run_loop = CF.CFRunLoopGetCurrent()
+        CS.FSEventStreamScheduleWithRunLoop(self._stream, run_loop, kCFRunLoopDefaultMode)
+        CS.FSEventStreamStart(self._stream)
+
+        self._running = True
+        self._run_loop = run_loop
+        self._CF = CF
+        self._CS = CS
+
+        CF.CFRunLoopRun()
+
+    def stop(self):
+        """停止监听。"""
+        if self._stream and self._running:
+            self._CS.FSEventStreamStop(self._stream)
+            self._CS.FSEventStreamInvalidate(self._stream)
+            self._CS.FSEventStreamRelease(self._stream)
+            self._CF.CFRunLoopStop(self._run_loop)
+            self._running = False
+
+
+def run_daemon_watch(cfg: Config):
+    """FSEvents 监听守护模式：文件变化时立即触发增量备份。"""
+    global _daemon_running
+    signal.signal(signal.SIGTERM, _daemon_signal_handler)
+    signal.signal(signal.SIGINT, _daemon_signal_handler)
+
+    logger = JSONLLogger(cfg.log_path)
+    roots = cfg.source_roots
+    watch_paths = [str(r) for r in roots if r.is_dir()]
+
+    if not watch_paths:
+        printerr("没有可监控的源目录")
+        sys.exit(EXIT_CONFIG)
+
+    printout("")
+    printbox("Adoback · 实时监听模式")
+    printout("")
+    printinfo(f"正在监听 {len(watch_paths)} 个目录的文件变化...")
+    for p in watch_paths:
+        printdim(f"    {p}")
+    printout("")
+    printdim("    文件保存后自动触发增量备份")
+    printdim("    按 Ctrl+C 停止")
+    printout("")
+    logger.info("watch_start", paths=watch_paths)
+
+    # 备份执行锁 (防止并发备份)
+    _backup_lock = threading.Lock()
+
+    def _on_change():
+        """文件变化回调 — 触发增量备份。"""
+        if not _daemon_running:
+            return
+        if not _backup_lock.acquire(blocking=False):
+            return  # 已有备份在运行
+        try:
+            printinfo(f"检测到文件变化，开始增量备份...")
+
+            # 检查磁盘空间
+            if cfg.dest_root.is_dir():
+                notify_disk_low(cfg, cfg.dest_root)
+
+            result = run_backup(cfg, "incremental", logger=logger)
+            if result.copied > 0 or result.failed > 0:
+                print_summary(result)
+                if result.failed > 0:
+                    notify_backup_failure(cfg, result)
+                elif result.copied > 0:
+                    notify_backup_success(cfg, result)
+                if result.failures:
+                    export_report(cfg, result)
+            elif result.total > 0:
+                now = datetime.datetime.now().strftime("%H:%M:%S")
+                printdim(f"    {now} — 文件已扫描，全部最新，无需备份")
+        except Exception as e:
+            logger.error("watch_error", error=str(e))
+            printerr(f"备份异常: {e}")
+            if cfg.notify_enabled:
+                _notify("Adoback 运行异常 ⚠", str(e), sound="Basso")
+        finally:
+            _backup_lock.release()
+
+    # 先跑一次初始增量备份
+    _on_change()
+
+    # 启动 FSEvents 监听 (在子线程)
+    watcher = FSEventsWatcher(watch_paths, _on_change, latency=2.0)
+    watch_thread = threading.Thread(target=watcher.start, daemon=True)
+    watch_thread.start()
+
+    # 主线程等待退出信号
+    try:
+        while _daemon_running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+    watcher.stop()
+    logger.info("watch_stop")
+    printout("")
+    printinfo("监听已停止")
 
 
 # ─────────────────────────────────────────────
@@ -3166,6 +3985,8 @@ def build_parser() -> argparse.ArgumentParser:
               {prog} setup                一键初始化 (首次使用)
               {prog} backup               增量备份
               {prog} backup --full        全量备份
+              {prog} watch                实时监听 (文件变化即备份)
+              {prog} status               状态面板
               {prog} restore              恢复备份文件
               {prog} clean --dry-run      预览可清理空间
               {prog} service on           安装并启动开机自启
@@ -3192,6 +4013,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # daemon
     sub.add_parser("daemon", help="守护模式 (前台循环增量备份)")
+
+    # watch — FSEvents 实时监听
+    sub.add_parser("watch", help="实时监听模式 (文件变化即备份)")
+
+    # status — TUI 仪表盘
+    p = sub.add_parser("status", help="状态面板 (一览备份全局)")
+    p.add_argument("--watch", "-w", action="store_true", help="实时刷新模式")
+    p.add_argument("--interval", type=int, default=5, help="刷新间隔 (秒，默认 5)")
 
     # doctor
     sub.add_parser("doctor", help="系统自检")
@@ -3234,6 +4063,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("update", help="检查并更新到最新版本")
     p.add_argument("--check", action="store_true", help="仅检查是否有新版本，不更新")
 
+    # completion — Tab 补全管理
+    p = sub.add_parser("completion", help="安装/卸载 Tab 补全")
+    p.add_argument("action", nargs="?", default="install", choices=["install", "uninstall"], help="install 或 uninstall")
+
     # restore — 恢复备份文件
     p = sub.add_parser("restore", help="从备份中恢复文件")
     p.add_argument("--search", "-s", help="搜索文件名关键词")
@@ -3254,8 +4087,7 @@ def build_parser() -> argparse.ArgumentParser:
     _hidden = ("config-init", "config-show", "config-validate", "config-paths",
                "full", "incremental",
                "service-install", "service-uninstall",
-               "service-start", "service-stop", "service-restart", "service-status",
-               "status")
+               "service-start", "service-stop", "service-restart", "service-status")
     for old_cmd in _hidden:
         sub.add_parser(old_cmd)
 
@@ -3312,7 +4144,6 @@ def main():
         "service-stop": ("service", "off"),
         "service-restart": ("service", "restart"),
         "service-status": ("service", "status"),
-        "status": ("service", "status"),
     }
 
     if cmd in _old_cmd_map:
@@ -3331,7 +4162,7 @@ def main():
             args.json_report = getattr(args, "json_report", False)
 
     # ── 不需要配置文件的命令 ──
-    no_config_commands = {"setup", "config", "guide", "install", "update", "uninstall"}
+    no_config_commands = {"setup", "config", "guide", "install", "update", "uninstall", "completion"}
     needs_config = cmd not in no_config_commands
 
     cfg = None
@@ -3480,9 +4311,47 @@ def main():
         elif cmd == "clean":
             cmd_clean(args, cfg)
 
+        # ── status ──
+        elif cmd == "status":
+            cmd_status(args, cfg)
+
+        # ── watch ──
+        elif cmd == "watch":
+            issues = cfg.validate()
+            if issues:
+                printerr("配置验证失败:")
+                for issue in issues:
+                    printout(f"  ✗ {issue}")
+                sys.exit(EXIT_CONFIG)
+            if not _fsevents_available():
+                printerr("FSEvents 不可用（仅支持 macOS）")
+                printdim("    将回退到定时轮询守护模式")
+                try:
+                    with InstanceLock(cfg.lock_path):
+                        run_daemon(cfg)
+                except LockError:
+                    printerr("另一个实例正在运行")
+                    exit_code = EXIT_LOCK
+            else:
+                try:
+                    with InstanceLock(cfg.lock_path):
+                        run_daemon_watch(cfg)
+                except LockError:
+                    printerr("另一个实例正在运行")
+                    exit_code = EXIT_LOCK
+
         # ── update ──
         elif cmd == "update":
             cmd_update(args, cfg)
+
+        # ── completion ──
+        elif cmd == "completion":
+            action = getattr(args, "action", "install")
+            if action == "uninstall":
+                _uninstall_completion()
+                printinfo("补全已卸载，重新打开终端生效")
+            else:
+                _install_completion()
 
         else:
             parser.print_help()

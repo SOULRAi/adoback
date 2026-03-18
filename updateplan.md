@@ -35,18 +35,22 @@
   - 支持源目录 + 全局 .adobackignore
   - scan_files 自动过滤，减少备份体积
 
+### v0.5.4 — TUI 状态面板 + FSEvents 实时监听
+- [x] `adoback status` TUI 状态面板
+  - 服务运行状态（PID、是否活跃）
+  - 监控目录概览（各源目录 Adobe 文件数）
+  - 备份空间占用（快照数、文件数、磁盘使用率进度条）
+  - 最近 5 次备份记录 + 最近 5 条日志
+  - `--watch` 实时刷新模式，`--interval` 自定义间隔
+- [x] `adoback watch` FSEvents 实时监听
+  - 纯 ctypes 调用 macOS FSEvents API，零依赖
+  - 文件保存后 ~2 秒自动触发增量备份
+  - 内置防抖机制，避免频繁触发
+  - 非 macOS 自动回退为定时轮询
+
 ---
 
 ## 📋 计划中
-
-### v0.7.0 — TUI 仪表盘 + FSEvents 监听
-- [ ] `adoback status` TUI 实时仪表盘
-  - 上次备份时间、监控目录状态、磁盘占用、最近日志
-  - 纯 curses / ANSI 实现，零依赖
-- [ ] FSEvents 文件系统监听（替代定时轮询）
-  - macOS 原生 fsevents API
-  - 文件保存即触发备份，延迟从分钟级降到秒级
-  - CPU 占用更低
 
 ### v0.8.0 — 分发渠道扩展
 - [ ] Homebrew Formula（`brew tap SOULRAi/tap && brew install adoback`）
@@ -77,6 +81,6 @@
 | v0.4.0 | 多源目录 + CLI 美化 + 自动更新 | ✅ 已发布 |
 | v0.5.0 | restore 恢复 + clean 清理 | ✅ 已发布 |
 | v0.5.2 | 桌面通知 + ignore 规则 | ✅ 已发布 |
-| v0.7.0 | TUI 仪表盘 + fsevents 监听 | 📋 计划中 |
+| v0.5.4 | status 面板 + watch 监听 | ✅ 已发布 |
 | v0.8.0 | Homebrew + CI/CD | 📋 计划中 |
 | v1.0.0 | 稳定版发布 | 📋 计划中 |
