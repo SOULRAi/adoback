@@ -35,7 +35,7 @@ from pathlib import Path
 # 常量
 # ─────────────────────────────────────────────
 
-VERSION = "0.5.4"
+VERSION = "0.5.6"
 APP_NAME = "adoback"
 SERVICE_LABEL = "com.local.adoback"
 GITHUB_REPO = "SOULRAi/adoback"
@@ -615,14 +615,17 @@ _ICON_FOLDER = "📁"
 _ICON_DISK = "💾"
 _ICON_CLOCK = "⏱"
 
-# ASCII Art Logo
-_LOGO = r"""
-     █████╗ ██████╗  ██████╗ ██████╗  █████╗  ██████╗██╗  ██╗
-    ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔════╝██║ ██╔╝
-    ███████║██║  ██║██║   ██║██████╔╝███████║██║     █████╔╝
-    ██╔══██║██║  ██║██║   ██║██╔══██╗██╔══██║██║     ██╔═██╗
-    ██║  ██║██████╔╝╚██████╔╝██████╔╝██║  ██║╚██████╗██║  ██╗
-    ╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝"""
+# 像素风 Logo (小巧，适合面板左侧)
+_MASCOT = [
+    "    ██████████    ",
+    "  ██░░░░░░░░░░██  ",
+    "██░░██░░░░░░██░░██",
+    "██░░░░░░░░░░░░░░██",
+    "██░░██░░░░░░██░░██",
+    "██░░░░██████░░░░██",
+    "  ██░░░░░░░░░░██  ",
+    "    ██████████    ",
+]
 
 # 渐变色阶 (紫 → 蓝 → 青)
 _GRADIENT_COLORS = [
@@ -636,6 +639,11 @@ _GRADIENT_COLORS = [
     "\033[38;5;44m",   # 青色
 ]
 
+# 主题色
+_THEME = "\033[38;5;135m"   # 紫色主色调
+_THEME2 = "\033[38;5;44m"   # 青色辅助色
+_BORDER = "\033[38;5;240m"  # 边框灰色
+
 
 def _use_color() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
@@ -645,8 +653,8 @@ def _c(code: str, text: str) -> str:
     return f"{code}{text}{_RESET}" if _use_color() else text
 
 
-def _gradient_line(text: str, colors: list[str] = None) -> str:
-    """对一行文本应用渐变色。"""
+def _gradient_text(text: str, colors: list[str] = None) -> str:
+    """对文本应用渐变色。"""
     if not _use_color() or not text.strip():
         return text
     if colors is None:
@@ -669,27 +677,97 @@ def _gradient_line(text: str, colors: list[str] = None) -> str:
     return "".join(result)
 
 
-def _print_logo(subtitle: str = ""):
-    """打印渐变色 ASCII Art Logo。"""
-    if not _use_color():
-        for line in _LOGO.strip().splitlines():
-            print(line)
-        if subtitle:
-            print(f"    {subtitle}")
-        return
+def _get_term_width() -> int:
+    """获取终端宽度。"""
+    try:
+        return os.get_terminal_size().columns
+    except (OSError, ValueError):
+        return 80
 
-    lines = _LOGO.strip().splitlines()
-    for line in lines:
-        print(_gradient_line(line))
 
-    # 副标题行
-    if subtitle:
-        # 居中对齐
-        logo_width = max(len(l) for l in lines)
-        sub_vis = _visible_len(subtitle)
-        pad = (logo_width - sub_vis) // 2
-        print(f"{' ' * pad}{_c(_DIM, subtitle)}")
-    print()
+def _panel(title: str, sections: list[tuple[str, list[str]]],
+           left_lines: list[str] = None, width: int = 0):
+    """绘制 Claude Code 风格面板。
+
+    title: 顶部标题栏文字
+    sections: [(标题, [内容行, ...]), ...]  右侧内容区
+    left_lines: 左侧面板行（mascot + 信息）
+    width: 面板总宽度，0=自动
+    """
+    if width <= 0:
+        width = min(_get_term_width() - 2, 78)
+    b = _BORDER  # 边框色
+
+    # 标题栏
+    title_vis = _visible_len(title)
+    dash_left = 2
+    dash_right = max(width - title_vis - dash_left - 4, 2)
+    print(_c(b, f"╭{'─' * dash_left}") + f" {_c(_BOLD, title)} " + _c(b, f"{'─' * dash_right}╮"))
+
+    if left_lines:
+        # 双栏模式
+        left_w = max(_visible_len(l) for l in left_lines) + 4
+        right_w = width - left_w - 3  # 3 for "│ " + "│"
+
+        # 合并右侧所有行
+        right_lines = []
+        for i, (sec_title, sec_lines) in enumerate(sections):
+            if sec_title:
+                right_lines.append(_c(_THEME, sec_title))
+            right_lines.extend(sec_lines)
+            if i < len(sections) - 1:
+                right_lines.append(_c(b, "─" * (right_w - 2)))
+
+        # 取最大行数
+        max_rows = max(len(left_lines), len(right_lines))
+
+        for r in range(max_rows):
+            # 左侧
+            if r < len(left_lines):
+                ltext = left_lines[r]
+            else:
+                ltext = ""
+            lpad = left_w - _visible_len(ltext)
+
+            # 右侧
+            if r < len(right_lines):
+                rtext = right_lines[r]
+            else:
+                rtext = ""
+            rpad = right_w - _visible_len(rtext) - 2
+
+            print(f"{_c(b, '│')} {ltext}{' ' * max(lpad, 0)}{_c(b, '│')} {rtext}{' ' * max(rpad, 0)}{_c(b, '│')}")
+    else:
+        # 单栏模式
+        inner_w = width - 4
+        for si, (sec_title, sec_lines) in enumerate(sections):
+            if sec_title:
+                print(f"{_c(b, '│')} {_c(_THEME, sec_title)}{' ' * (inner_w - _visible_len(sec_title))}{_c(b, '│')}")
+            for line in sec_lines:
+                pad = inner_w - _visible_len(line)
+                print(f"{_c(b, '│')} {line}{' ' * max(pad, 0)} {_c(b, '│')}")
+            # 分隔线（最后一个 section 不加）
+            if si < len(sections) - 1:
+                print(f"{_c(b, '├' + '─' * (width - 2) + '┤')}")
+
+    # 底部边框
+    print(_c(b, f"╰{'─' * (width - 2)}╯"))
+
+
+def _print_mascot_colored() -> list[str]:
+    """返回上色的 mascot 行。"""
+    lines = []
+    for row in _MASCOT:
+        colored = ""
+        for ch in row:
+            if ch == '█':
+                colored += _c(_THEME, ch)
+            elif ch == '░':
+                colored += _c(_THEME2, ch)
+            else:
+                colored += ch
+        lines.append(colored)
+    return lines
 
 
 def _visible_len(s: str) -> int:
@@ -2195,8 +2273,11 @@ def cmd_guide(args, cfg):
 def _interactive_guide():
     """交互式新手引导。"""
     printout("")
-    _print_logo(f"v{VERSION} · 交互式引导")
-    printdim("    一步一步来，帮你把备份配好 ~")
+    _panel(
+        _gradient_text(f"Adoback v{VERSION} · 交互式引导"),
+        [("", [f"  {_c(_DIM, '一步一步来，帮你把备份配好 ~')}"])],
+    )
+    printout("")
 
     # 1. 检查配置文件
     printstep(1, "检查配置文件")
@@ -3170,8 +3251,11 @@ def _ask_dest_dir() -> str:
 def cmd_setup(args, cfg):
     """一键初始化：安装 + 生成配置 + 交互引导 + 自检。"""
     printout("")
-    _print_logo(f"v{VERSION} · 一键初始化")
-    printdim("    跟着提示走，几步就搞定 ~")
+    _panel(
+        _gradient_text(f"Adoback v{VERSION} · 一键初始化"),
+        [("", [f"  {_c(_DIM, '跟着提示走，几步就搞定 ~')}"])],
+    )
+    printout("")
 
     # 1. 安装程序
     printstep(1, "安装程序")
@@ -3610,8 +3694,7 @@ def cmd_status(args, cfg):
 
         # ── 标题 ──
         lines.append("")
-        # 小型 logo 用于状态面板 (避免太长)
-        mini_logo = f"  {_c(_BOLD, _gradient_line('◈ ADOBACK'))}  {_c(_DIM, f'v{VERSION} · 状态面板')}"
+        mini_logo = f"  {_c(_BOLD, _gradient_text('◈ ADOBACK'))}  {_c(_DIM, f'v{VERSION} · 状态面板')}"
         lines.append(mini_logo)
         lines.append(f"  {_c(_DIM, '━' * 52)}")
         lines.append(f"  {_c(_DIM, now_str)}")
@@ -4033,9 +4116,7 @@ def run_daemon_watch(cfg: Config):
 # ─────────────────────────────────────────────
 
 def _prog() -> str:
-    if _is_frozen():
-        return "adoback"
-    return os.path.basename(sys.argv[0])
+    return "adoback"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4169,18 +4250,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _first_run_hint():
     """首次运行提示：无配置文件时引导用户 setup。"""
+    mascot = _print_mascot_colored()
+    mascot.append("")
+    mascot.append(_c(_DIM, f"  v{VERSION}"))
+    mascot.append(_c(_DIM, "  macOS 专属"))
+
+    tips = [
+        f"  {_c(_CYAN, '?')} 看起来你是第一次运行 Adoback",
+        "",
+        f"  {_c(_GREEN, _ICON_ARROW)} {_c(_BOLD, _prog() + ' setup')}      一键初始化 ⭐",
+        f"  {_c(_DIM, _ICON_ARROW)} {_prog()} guide      查看新手引导",
+        f"  {_c(_DIM, _ICON_ARROW)} {_prog()} --help     查看所有命令",
+        "",
+        f"  {_c(_DIM, '开源: github.com/SOULRAi/adoback')}",
+    ]
+
     printout("")
-    _print_logo(f"v{VERSION} · macOS Adobe 项目文件备份守护")
-    printbar("━", 58)
-    printout("")
-    printout(f"  {_c(_CYAN, '?')} 看起来你是第一次运行 Adoback")
-    printout("")
-    printout(f"    {_c(_GREEN, _ICON_ARROW)} {_c(_BOLD, _prog() + ' setup')}        一键初始化（推荐 ⭐）")
-    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} guide        查看新手引导")
-    printout(f"    {_c(_DIM, _ICON_ARROW)} {_prog()} --help       查看所有命令")
-    printout("")
-    printbar("━", 58)
-    printdim("    开源: github.com/SOULRAi/adoback")
+    _panel(
+        _gradient_text(f"Adoback v{VERSION}"),
+        [("快速开始", tips)],
+        left_lines=mascot,
+    )
     printout("")
 
 
@@ -4194,10 +4284,26 @@ def main():
         if not config_found:
             _first_run_hint()
         else:
-            # 已有配置，显示迷你 banner + help
+            # 已有配置，显示面板 + help
+            mascot = _print_mascot_colored()
+            mascot.append("")
+            mascot.append(_c(_DIM, f"  v{VERSION}"))
+
+            info = [
+                f"  {_c(_GREEN, _ICON_OK)} 已配置，随时可用",
+                "",
+                f"  {_c(_THEME2, _ICON_ARROW)} {_c(_BOLD, _prog() + ' backup')}     执行备份",
+                f"  {_c(_DIM, _ICON_ARROW)} {_prog()} status     查看状态",
+                f"  {_c(_DIM, _ICON_ARROW)} {_prog()} watch      实时监听",
+                f"  {_c(_DIM, _ICON_ARROW)} {_prog()} --help     所有命令",
+            ]
+
             printout("")
-            printout(f"  {_gradient_line('◈ ADOBACK')}  {_c(_DIM, f'v{VERSION}')}")
-            printout(f"  {_c(_DIM, '━' * 52)}")
+            _panel(
+                _gradient_text(f"Adoback v{VERSION}"),
+                [("常用命令", info)],
+                left_lines=mascot,
+            )
             printout("")
             parser.print_help()
         sys.exit(0)
